@@ -11,16 +11,67 @@ permissions:
 jobs:
   release-win-x64:
     name: Build and release Windows x64
-    runs-on: windows-2025
+    runs-on: windows-2025-vs2026
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v5.3.0
         with:
           dotnet-version: 8.0.x
+
+      - name: Generate release metadata
+        id: meta
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
+
+          $version = "0.1.${{ github.run_number }}"
+          $tag = "v$version"
+          $shortSha = "${{ github.sha }}".Substring(0, 7)
+          $previousTag = git tag --list "v*" --sort=-v:refname | Select-Object -First 1
+
+          if ([string]::IsNullOrWhiteSpace($previousTag)) {
+            $logRange = "HEAD"
+          } else {
+            $logRange = "$previousTag..HEAD"
+          }
+
+          $changes = @(git log $logRange --pretty=format:"- %s (%h)" --no-merges)
+          if ($changes.Count -eq 0) {
+            $changes = @("- 内部维护更新。")
+          }
+
+          $changelogPath = Join-Path $PWD "artifacts\changelog.txt"
+          $notesPath = Join-Path $PWD "artifacts\release-notes.md"
+
+          $changes | Set-Content -LiteralPath $changelogPath -Encoding UTF8
+          @(
+            "# SteamEYA $tag"
+            ""
+            "版本号：``$tag``"
+            "平台：``Windows x64``"
+            "提交：``$shortSha``"
+            ""
+            "## 更新日志"
+            $changes
+            ""
+            "## 运行依赖"
+            "- Windows 10 1809 / Windows 11，x64。"
+            "- .NET 8 Desktop Runtime x64。"
+            "- Windows App Runtime / Windows App SDK Runtime。"
+            "- 7-Zip 或 NanaZip，用于解压 ``.7z`` 发布包。"
+          ) | Set-Content -LiteralPath $notesPath -Encoding UTF8
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
+          "notes_path=$notesPath" >> $env:GITHUB_OUTPUT
+          "changelog_path=$changelogPath" >> $env:GITHUB_OUTPUT
 
       - name: Restore
         run: dotnet restore .\SteamEyaWinUI.sln
@@ -30,17 +81,19 @@ jobs:
           dotnet build .\SteamEyaWinUI\SteamEyaWinUI.csproj
           --configuration Release
           --output .\artifacts\build\win-x64
+          -p:Version=${{ steps.meta.outputs.version }}
+          -p:FileVersion=${{ steps.meta.outputs.version }}.0
+          -p:AssemblyVersion=${{ steps.meta.outputs.version }}.0
+          -p:InformationalVersion=${{ steps.meta.outputs.tag }}+${{ github.sha }}
 
       - name: Package
         id: package
         shell: pwsh
         run: |
-          $shortSha = "${{ github.sha }}".Substring(0, 7)
-          $artifactName = "SteamEYA-win-x64-$shortSha.7z"
+          $artifactName = "SteamEYA-${{ steps.meta.outputs.version }}-win-x64.7z"
           $artifactPath = Join-Path $PWD "artifacts\$artifactName"
+          $metadataPath = Join-Path $PWD "artifacts\latest.json"
           $packageDir = Join-Path $PWD "artifacts\build\win-x64"
-
-          New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
 
           Get-ChildItem -LiteralPath $packageDir -Filter "*.pdb" -File | Remove-Item -Force
           foreach ($pattern in @(
@@ -80,18 +133,35 @@ jobs:
             throw "Release artifact is $([math]::Round($artifact.Length / 1MB, 2)) MB, larger than the 8 MB limit."
           }
 
-          "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
+          $sha256 = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $changelog = @(Get-Content -LiteralPath "${{ steps.meta.outputs.changelog_path }}")
+          $metadata = [ordered]@{
+            version = "${{ steps.meta.outputs.version }}"
+            tag = "${{ steps.meta.outputs.tag }}"
+            channel = "stable"
+            platform = "win-x64"
+            commit = "${{ github.sha }}"
+            artifactName = $artifactName
+            artifactSize = $artifact.Length
+            artifactSha256 = $sha256
+            changelog = $changelog
+          }
+          $metadata | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $metadataPath -Encoding UTF8
+
           "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
           "artifact_path=$artifactPath" >> $env:GITHUB_OUTPUT
+          "metadata_path=$metadataPath" >> $env:GITHUB_OUTPUT
           "artifact_size_mb=$([math]::Round($artifact.Length / 1MB, 2))" >> $env:GITHUB_OUTPUT
+          "artifact_sha256=$sha256" >> $env:GITHUB_OUTPUT
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $tag = "main-${{ github.run_id }}-${{ steps.package.outputs.short_sha }}"
-          gh release create $tag "${{ steps.package.outputs.artifact_path }}" `
+          gh release create "${{ steps.meta.outputs.tag }}" `
+            "${{ steps.package.outputs.artifact_path }}" `
+            "${{ steps.package.outputs.metadata_path }}" `
             --target "${{ github.sha }}" `
-            --title "SteamEYA ${{ steps.package.outputs.short_sha }}" `
-            --notes "自动发布 main 分支提交 ${{ github.sha }} 的 Windows x64 精简版。产物为 7z 压缩包，大小约 ${{ steps.package.outputs.artifact_size_mb }} MB。"
+            --title "SteamEYA ${{ steps.meta.outputs.tag }}" `
+            --notes-file "${{ steps.meta.outputs.notes_path }}"
