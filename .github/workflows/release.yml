@@ -25,31 +25,65 @@ jobs:
       - name: Restore
         run: dotnet restore .\SteamEyaWinUI.sln
 
-      - name: Publish Windows x64
+      - name: Build Windows x64
         run: >
-          dotnet publish .\SteamEyaWinUI\SteamEyaWinUI.csproj
+          dotnet build .\SteamEyaWinUI\SteamEyaWinUI.csproj
           --configuration Release
-          --runtime win-x64
-          --self-contained true
-          --output .\artifacts\publish\win-x64
-          -p:WindowsPackageType=None
-          -p:WindowsAppSDKSelfContained=true
-          -p:PublishSingleFile=false
+          --output .\artifacts\build\win-x64
 
       - name: Package
         id: package
         shell: pwsh
         run: |
           $shortSha = "${{ github.sha }}".Substring(0, 7)
-          $artifactName = "SteamEYA-win-x64-$shortSha.zip"
+          $artifactName = "SteamEYA-win-x64-$shortSha.7z"
           $artifactPath = Join-Path $PWD "artifacts\$artifactName"
+          $packageDir = Join-Path $PWD "artifacts\build\win-x64"
 
           New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
-          Compress-Archive -Path .\artifacts\publish\win-x64\* -DestinationPath $artifactPath -Force
+
+          Get-ChildItem -LiteralPath $packageDir -Filter "*.pdb" -File | Remove-Item -Force
+          foreach ($pattern in @(
+            "Microsoft.Web.WebView2.Core*.dll",
+            "Microsoft.ML.OnnxRuntime.dll",
+            "System.Numerics.Tensors.dll"
+          )) {
+            Get-ChildItem -LiteralPath $packageDir -Filter $pattern -File | Remove-Item -Force
+          }
+
+          $runtimeRoot = Join-Path $packageDir "runtimes"
+          if (Test-Path -LiteralPath $runtimeRoot) {
+            Get-ChildItem -LiteralPath $runtimeRoot -Directory |
+              Where-Object { $_.Name -ne "win-x64" } |
+              Remove-Item -Recurse -Force
+          }
+
+          $keepDirs = @("Microsoft.UI.Xaml", "runtimes", "zh-CN")
+          Get-ChildItem -LiteralPath $packageDir -Directory |
+            Where-Object {
+              $_.Name -match "^[a-z]{2}(-[A-Za-z0-9]+){0,2}$" -and
+              $_.Name -notin $keepDirs
+            } |
+            Remove-Item -Recurse -Force
+
+          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) {
+            $sevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+          }
+          if (-not (Test-Path -LiteralPath $sevenZip)) {
+            throw "7-Zip was not found on the runner."
+          }
+
+          & $sevenZip a -t7z -mx=9 -mmt=on $artifactPath "$packageDir\*"
+          $artifact = Get-Item -LiteralPath $artifactPath
+          if ($artifact.Length -gt 8MB) {
+            throw "Release artifact is $([math]::Round($artifact.Length / 1MB, 2)) MB, larger than the 8 MB limit."
+          }
 
           "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
           "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
           "artifact_path=$artifactPath" >> $env:GITHUB_OUTPUT
+          "artifact_size_mb=$([math]::Round($artifact.Length / 1MB, 2))" >> $env:GITHUB_OUTPUT
 
       - name: Create GitHub Release
         env:
@@ -60,4 +94,4 @@ jobs:
           gh release create $tag "${{ steps.package.outputs.artifact_path }}" `
             --target "${{ github.sha }}" `
             --title "SteamEYA ${{ steps.package.outputs.short_sha }}" `
-            --notes "自动发布 main 分支提交 ${{ github.sha }} 的 Windows x64 自包含版本。"
+            --notes "自动发布 main 分支提交 ${{ github.sha }} 的 Windows x64 精简版。产物为 7z 压缩包，大小约 ${{ steps.package.outputs.artifact_size_mb }} MB。"
