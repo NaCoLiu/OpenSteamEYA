@@ -45,4 +45,16 @@ Release 会包含：
 - `latest.json`，包含版本号、tag、平台、commit、文件大小、SHA256 和更新日志。
 - Release Notes，包含版本号和从上一个 `v*` 版本以来的提交更新日志。
 
-后续做检查更新和自动更新时，可以读取 GitHub Latest Release 或 Release 附件里的 `latest.json`。如果仓库保持私有，客户端需要有 GitHub 访问凭据，或者改成自建更新源。
+## 检查更新
+
+项目仓库为公开仓库，客户端可以直接读取 GitHub Latest Release，不需要 GitHub Token。
+
+应用内“关于”页面会：
+
+- 显示当前版本。
+- 连接 GitHub Releases。
+- 读取最新 Release 附件里的 `latest.json`。
+- 比较本地版本和最新版本。
+- 提供 GitHub 仓库、发布页和下载更新入口。
+
+后续自动更新可以继续复用 `latest.json` 里的 `artifactName`、`artifactSize`、`artifactSha256` 和 `changelog` 字段。

@@ -24,14 +24,17 @@ public sealed partial class MainWindow : Window
     private readonly SteamTokenOnlineValidationService _tokenOnlineValidationService = new();
     private readonly AccountHistoryService _accountHistoryService = new();
     private readonly CsPremierScoreService _premierScoreService = new();
+    private readonly GitHubUpdateService _updateService = new();
     private readonly SubclassProc _subclassProc;
     private nint _hwnd;
     private bool _isApplyingSizeConstraint;
     private bool _isBusy;
+    private bool _isCheckingForUpdates;
     private List<SteamAccountHistoryItem> _historyAccounts = [];
     private SteamAccountData? _cachedAccountData;
     private string? _cachedLicenseKey;
     private SteamUpstreamServer? _cachedServer;
+    private GitHubUpdateInfo? _latestUpdate;
 
     public MainWindow()
     {
@@ -39,6 +42,8 @@ public sealed partial class MainWindow : Window
 
         InitializeComponent();
         SystemBackdrop = new MicaBackdrop();
+        SetWindowIcon();
+        InitializeAboutPage();
 
         UpstreamServerBox.ItemsSource = SteamLicenseClient.Servers;
         UpstreamServerBox.SelectedIndex = 2;
@@ -58,6 +63,8 @@ public sealed partial class MainWindow : Window
                 ApplyWindowSizeConstraints();
             }
         };
+
+        _ = CheckForUpdatesAsync(isAutomatic: true);
     }
 
     private async void ClearWorkshopButton_Click(object sender, RoutedEventArgs e)
@@ -238,6 +245,33 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private async void CheckUpdateButton_Click(object sender, RoutedEventArgs e)
+    {
+        await CheckForUpdatesAsync(isAutomatic: false);
+    }
+
+    private async void DownloadUpdateButton_Click(object sender, RoutedEventArgs e)
+    {
+        var url = _latestUpdate?.ArtifactUrl ?? _latestUpdate?.ReleaseUrl;
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            ShowStatus("还没有可下载的更新信息，请先检查更新。", InfoBarSeverity.Warning);
+            return;
+        }
+
+        await OpenUrlAsync(url);
+    }
+
+    private async void OpenReleaseButton_Click(object sender, RoutedEventArgs e)
+    {
+        await OpenUrlAsync(_latestUpdate?.ReleaseUrl ?? GitHubUpdateService.ReleasesUrl);
+    }
+
+    private async void OpenGitHubButton_Click(object sender, RoutedEventArgs e)
+    {
+        await OpenUrlAsync(GitHubUpdateService.RepositoryUrl);
+    }
+
     private void ModeRadioButton_Checked(object sender, RoutedEventArgs e)
     {
         if (ManualPanel is null || AutoPanel is null)
@@ -254,13 +288,22 @@ public sealed partial class MainWindow : Window
 
     private void ShowPage(string pageName)
     {
+        var showLogin = pageName == "login";
         var showHistory = pageName == "history";
-        LoginPage.Visibility = showHistory ? Visibility.Collapsed : Visibility.Visible;
+        var showAbout = pageName == "about";
+
+        LoginPage.Visibility = showLogin ? Visibility.Visible : Visibility.Collapsed;
         HistoryPage.Visibility = showHistory ? Visibility.Visible : Visibility.Collapsed;
+        AboutPage.Visibility = showAbout ? Visibility.Visible : Visibility.Collapsed;
 
         if (showHistory)
         {
             RefreshHistoryAccounts(GetSelectedHistorySteamId());
+        }
+
+        if (showAbout && _latestUpdate is null && !_isCheckingForUpdates)
+        {
+            _ = CheckForUpdatesAsync(isAutomatic: true);
         }
     }
 
@@ -712,6 +755,121 @@ public sealed partial class MainWindow : Window
             AccountInfoAvailabilityText.Text = "无效";
             AccountInfoAvailabilityText.Foreground = GetStatusBrush(InfoBarSeverity.Error);
             return result;
+        }
+    }
+
+    private void InitializeAboutPage()
+    {
+        AboutVersionText.Text = $"当前版本：v{GitHubUpdateService.CurrentVersion}";
+        AboutUpdateStatusText.Text = "正在连接 GitHub Releases...";
+        AboutArtifactText.Text = "最新成品：未检查";
+        AboutUpdateCheckedText.Text = "检查时间：未检查";
+        AboutChangelogText.Text = "更新日志：未检查";
+        DownloadUpdateButton.IsEnabled = false;
+    }
+
+    private async Task CheckForUpdatesAsync(bool isAutomatic)
+    {
+        if (_isCheckingForUpdates)
+        {
+            return;
+        }
+
+        _isCheckingForUpdates = true;
+        CheckUpdateButton.IsEnabled = false;
+        DownloadUpdateButton.IsEnabled = false;
+        AboutUpdateStatusText.Text = isAutomatic
+            ? "正在后台连接 GitHub Releases..."
+            : "正在连接 GitHub Releases...";
+        AboutUpdateCheckedText.Text = "检查时间：检查中";
+
+        if (!isAutomatic)
+        {
+            ShowStatus("正在检查更新...", InfoBarSeverity.Informational);
+        }
+
+        try
+        {
+            var update = await _updateService.CheckLatestAsync();
+            _latestUpdate = update;
+            ApplyUpdateInfo(update);
+
+            if (update.IsUpdateAvailable)
+            {
+                ShowStatus($"发现新版本 {update.LatestTag}。", InfoBarSeverity.Warning);
+            }
+            else if (!isAutomatic)
+            {
+                ShowStatus($"已经是最新版本：{update.LatestTag}。", InfoBarSeverity.Success);
+            }
+        }
+        catch (Exception ex)
+        {
+            AboutUpdateStatusText.Text = $"GitHub 连接失败：{ex.Message}";
+            AboutArtifactText.Text = "最新成品：读取失败";
+            AboutUpdateCheckedText.Text = $"检查时间：{FormatDateTime(DateTimeOffset.Now)}";
+            AboutChangelogText.Text = "更新日志：读取失败";
+
+            if (!isAutomatic)
+            {
+                ShowStatus($"检查更新失败：{ex.Message}", InfoBarSeverity.Error);
+            }
+        }
+        finally
+        {
+            _isCheckingForUpdates = false;
+            CheckUpdateButton.IsEnabled = true;
+            DownloadUpdateButton.IsEnabled = !string.IsNullOrWhiteSpace(_latestUpdate?.ArtifactUrl);
+        }
+    }
+
+    private void ApplyUpdateInfo(GitHubUpdateInfo update)
+    {
+        AboutVersionText.Text = $"当前版本：v{update.CurrentVersion}";
+        AboutUpdateStatusText.Text = update.IsUpdateAvailable
+            ? $"发现新版本 {update.LatestTag}。"
+            : $"已是最新版本：{update.LatestTag}。";
+        AboutArtifactText.Text = string.IsNullOrWhiteSpace(update.ArtifactName)
+            ? "最新成品：未找到下载附件"
+            : $"最新成品：{update.ArtifactName}（{FormatFileSize(update.ArtifactSize)}）";
+        AboutUpdateCheckedText.Text = $"检查时间：{FormatDateTime(update.CheckedAt)}";
+        AboutChangelogText.Text = update.Changelog.Count == 0
+            ? "更新日志：暂无"
+            : "更新日志：\n" + string.Join('\n', update.Changelog.Take(8));
+    }
+
+    private async Task OpenUrlAsync(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            ShowStatus("链接格式不正确。", InfoBarSeverity.Error);
+            return;
+        }
+
+        var opened = await Windows.System.Launcher.LaunchUriAsync(uri);
+        ShowStatus(
+            opened ? "已打开浏览器。" : "无法打开浏览器。",
+            opened ? InfoBarSeverity.Success : InfoBarSeverity.Error);
+    }
+
+    private static string FormatFileSize(long? bytes)
+    {
+        if (!bytes.HasValue)
+        {
+            return "未知大小";
+        }
+
+        return bytes.Value >= 1024 * 1024
+            ? $"{bytes.Value / 1024d / 1024d:F2} MB"
+            : $"{bytes.Value / 1024d:F0} KB";
+    }
+
+    private void SetWindowIcon()
+    {
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+        if (File.Exists(iconPath))
+        {
+            AppWindow.SetIcon(iconPath);
         }
     }
 
