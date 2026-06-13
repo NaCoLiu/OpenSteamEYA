@@ -16,6 +16,14 @@ internal sealed class SteamLoginCacheService
         Timeout = TimeSpan.FromSeconds(6)
     };
 
+    // 缓存文件是进程级单一资源（路径固定），所有「读-改-写」必须串行，否则后台头像刷新与
+    // 用户在已缓存账号页的删除/清空会互相覆盖（丢失刚缓存的账号 / 已删账号复活）。临界区全为
+    // 同步代码（网络抓取在锁外），故用普通 lock 即可。
+    private static readonly object FileLock = new();
+
+    // 一次刷新对 steamcommunity 的并发抓取上限，避免一次性开太多连接触发 429（与 AccountHistoryService 一致）。
+    private const int MaxProfileFetchConcurrency = 4;
+
     public SteamLoginCacheService()
     {
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
@@ -32,7 +40,10 @@ internal sealed class SteamLoginCacheService
 
     public IReadOnlyList<CachedSteamLoginAccount> LoadAll()
     {
-        return NormalizeAccounts(ReadDocument().Accounts);
+        lock (FileLock)
+        {
+            return NormalizeAccounts(ReadDocument().Accounts);
+        }
     }
 
     public void MarkEyaLogin(string accountName, string steamId)
@@ -49,68 +60,81 @@ internal sealed class SteamLoginCacheService
             return;
         }
 
-        var document = ReadDocument();
-        var existing = FindExisting(document.EyaAccounts, marker);
-        if (existing is null)
+        lock (FileLock)
         {
-            document.EyaAccounts.Add(marker);
-        }
-        else
-        {
-            existing.AccountName = marker.AccountName;
-            existing.SteamId = marker.SteamId;
-            existing.CachedAt = marker.CachedAt;
-        }
+            var document = ReadDocument();
+            var existing = FindExisting(document.EyaAccounts, marker);
+            if (existing is null)
+            {
+                document.EyaAccounts.Add(marker);
+            }
+            else
+            {
+                existing.AccountName = marker.AccountName;
+                existing.SteamId = marker.SteamId;
+                existing.CachedAt = marker.CachedAt;
+            }
 
-        document.EyaAccounts = NormalizeAccounts(document.EyaAccounts).ToList();
-        WriteDocument(document);
+            document.EyaAccounts = NormalizeAccounts(document.EyaAccounts).ToList();
+            WriteDocument(document);
+        }
     }
 
     public bool IsEyaLogin(CachedSteamLoginAccount account)
     {
-        return FindExisting(ReadDocument().EyaAccounts, account) is not null;
+        lock (FileLock)
+        {
+            return FindExisting(ReadDocument().EyaAccounts, account) is not null;
+        }
     }
 
     public IReadOnlyList<CachedSteamLoginAccount> SaveMany(IEnumerable<CachedSteamLoginAccount> accounts)
     {
-        var document = ReadDocument();
         var saved = new List<CachedSteamLoginAccount>();
-        foreach (var account in accounts)
+        lock (FileLock)
         {
-            account.AccountName = account.AccountName.Trim();
-            account.SteamId = account.SteamId.Trim();
-
-            if (!IsUsable(account))
+            var document = ReadDocument();
+            foreach (var account in accounts)
             {
-                continue;
+                account.AccountName = account.AccountName.Trim();
+                account.SteamId = account.SteamId.Trim();
+
+                if (!IsUsable(account))
+                {
+                    continue;
+                }
+
+                account.CachedAt = DateTimeOffset.Now;
+                var existing = FindExisting(document.Accounts, account);
+                if (existing is null)
+                {
+                    document.Accounts.Add(account);
+                    saved.Add(account);
+                    continue;
+                }
+
+                existing.AccountName = account.AccountName;
+                existing.SteamId = account.SteamId;
+                existing.CachedAt = account.CachedAt;
+                existing.PersonaName = string.IsNullOrWhiteSpace(account.PersonaName)
+                    ? existing.PersonaName
+                    : account.PersonaName;
+                existing.AvatarUrl = string.IsNullOrWhiteSpace(account.AvatarUrl)
+                    ? existing.AvatarUrl
+                    : account.AvatarUrl;
+                existing.AvatarPath = string.IsNullOrWhiteSpace(account.AvatarPath)
+                    ? existing.AvatarPath
+                    : account.AvatarPath;
+                existing.ConnectCacheToken = string.IsNullOrWhiteSpace(account.ConnectCacheToken)
+                    ? existing.ConnectCacheToken
+                    : account.ConnectCacheToken;
+                saved.Add(existing);
             }
 
-            account.CachedAt = DateTimeOffset.Now;
-            var existing = FindExisting(document.Accounts, account);
-            if (existing is null)
-            {
-                document.Accounts.Add(account);
-                saved.Add(account);
-                continue;
-            }
-
-            existing.AccountName = account.AccountName;
-            existing.SteamId = account.SteamId;
-            existing.CachedAt = account.CachedAt;
-            existing.PersonaName = string.IsNullOrWhiteSpace(account.PersonaName)
-                ? existing.PersonaName
-                : account.PersonaName;
-            existing.AvatarUrl = string.IsNullOrWhiteSpace(account.AvatarUrl)
-                ? existing.AvatarUrl
-                : account.AvatarUrl;
-            existing.AvatarPath = string.IsNullOrWhiteSpace(account.AvatarPath)
-                ? existing.AvatarPath
-                : account.AvatarPath;
-            saved.Add(existing);
+            document.Accounts = NormalizeAccounts(document.Accounts).ToList();
+            WriteDocument(document);
         }
 
-        document.Accounts = NormalizeAccounts(document.Accounts).ToList();
-        WriteDocument(document);
         return saved;
     }
 
@@ -127,48 +151,63 @@ internal sealed class SteamLoginCacheService
             return 0;
         }
 
+        // 网络抓取在锁外并发进行，但用信号量限流，避免一次性对 steamcommunity 开太多连接触发 429。
+        using var throttle = new SemaphoreSlim(MaxProfileFetchConcurrency);
         var results = await Task.WhenAll(targets.Select(async account =>
         {
-            var profile = await TryGetSteamProfileAsync(account.SteamId);
-            var avatarPath = !string.IsNullOrWhiteSpace(profile?.AvatarUrl)
-                ? await TryDownloadAvatarAsync(account.SteamId, account.AccountName, profile.AvatarUrl)
-                : null;
-            return (Account: account, Profile: profile, AvatarPath: avatarPath);
+            await throttle.WaitAsync();
+            try
+            {
+                var profile = await TryGetSteamProfileAsync(account.SteamId);
+                var avatarPath = !string.IsNullOrWhiteSpace(profile?.AvatarUrl)
+                    ? await TryDownloadAvatarAsync(account.SteamId, account.AccountName, profile.AvatarUrl)
+                    : null;
+                return (Account: account, Profile: profile, AvatarPath: avatarPath);
+            }
+            finally
+            {
+                throttle.Release();
+            }
         }));
 
-        var document = ReadDocument();
+        // 抓取耗时可能数秒，期间用户可能已删除/清空账号；故在锁内基于「当前」磁盘状态合并回写，
+        // 而非把抓取前读到的旧快照整体覆盖（否则会让已删账号复活、丢失并发写入）。
         var updatedCount = 0;
-        foreach (var (account, profile, avatarPath) in results)
+        lock (FileLock)
         {
-            if (profile is null)
+            var document = ReadDocument();
+            foreach (var (account, profile, avatarPath) in results)
             {
-                continue;
+                if (profile is null)
+                {
+                    continue;
+                }
+
+                var item = FindExisting(document.Accounts, account);
+                if (item is null)
+                {
+                    continue;
+                }
+
+                if (!string.IsNullOrWhiteSpace(profile.PersonaName))
+                {
+                    item.PersonaName = profile.PersonaName;
+                }
+
+                if (!string.IsNullOrWhiteSpace(profile.AvatarUrl))
+                {
+                    item.AvatarUrl = profile.AvatarUrl;
+                    item.AvatarPath = avatarPath ?? item.AvatarPath;
+                }
+
+                updatedCount++;
             }
 
-            var item = FindExisting(document.Accounts, account);
-            if (item is null)
+            if (updatedCount > 0)
             {
-                continue;
+                document.Accounts = NormalizeAccounts(document.Accounts).ToList();
+                WriteDocument(document);
             }
-
-            if (!string.IsNullOrWhiteSpace(profile.PersonaName))
-            {
-                item.PersonaName = profile.PersonaName;
-            }
-
-            if (!string.IsNullOrWhiteSpace(profile.AvatarUrl))
-            {
-                item.AvatarUrl = profile.AvatarUrl;
-                item.AvatarPath = avatarPath ?? item.AvatarPath;
-            }
-
-            updatedCount++;
-        }
-
-        if (updatedCount > 0)
-        {
-            document.Accounts = NormalizeAccounts(document.Accounts).ToList();
-            WriteDocument(document);
         }
 
         return updatedCount;
@@ -182,10 +221,14 @@ internal sealed class SteamLoginCacheService
         }
 
         var keys = accounts.Select(account => account.CacheKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var document = ReadDocument();
-        var removed = document.Accounts.RemoveAll(account => keys.Contains(account.CacheKey));
-        document.Accounts = NormalizeAccounts(document.Accounts).ToList();
-        WriteDocument(document);
+        int removed;
+        lock (FileLock)
+        {
+            var document = ReadDocument();
+            removed = document.Accounts.RemoveAll(account => keys.Contains(account.CacheKey));
+            document.Accounts = NormalizeAccounts(document.Accounts).ToList();
+            WriteDocument(document);
+        }
 
         foreach (var account in accounts)
         {
@@ -197,17 +240,24 @@ internal sealed class SteamLoginCacheService
 
     public int ClearAll()
     {
-        var document = ReadDocument();
-        var count = NormalizeAccounts(document.Accounts).Count;
-        foreach (var account in document.Accounts)
+        int count;
+        List<CachedSteamLoginAccount> clearedAvatars;
+        lock (FileLock)
+        {
+            var document = ReadDocument();
+            count = NormalizeAccounts(document.Accounts).Count;
+            clearedAvatars = document.Accounts.ToList();
+            WriteDocument(new CachedSteamLoginDocument
+            {
+                EyaAccounts = NormalizeAccounts(document.EyaAccounts).ToList()
+            });
+        }
+
+        foreach (var account in clearedAvatars)
         {
             TryDeleteFile(account.AvatarPath);
         }
 
-        WriteDocument(new CachedSteamLoginDocument
-        {
-            EyaAccounts = NormalizeAccounts(document.EyaAccounts).ToList()
-        });
         return count;
     }
 
@@ -266,7 +316,12 @@ internal sealed class SteamLoginCacheService
         var json = JsonSerializer.Serialize(
             document,
             SteamLoginCacheJsonContext.Default.CachedSteamLoginDocument);
-        File.WriteAllText(CacheFilePath, json);
+
+        // 原子写入：先写临时文件再 Move 覆盖，崩溃或并发读取只会看到完整的旧文件或完整的新文件，
+        // 不会读到 File.WriteAllText「先截断后写入」中途的空/半截 JSON。
+        var tempPath = CacheFilePath + ".tmp";
+        File.WriteAllText(tempPath, json);
+        File.Move(tempPath, CacheFilePath, overwrite: true);
     }
 
     private static CachedSteamLoginAccount? FindExisting(

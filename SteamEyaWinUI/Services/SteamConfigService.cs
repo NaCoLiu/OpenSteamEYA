@@ -20,7 +20,10 @@ internal sealed class SteamConfigService
 
         accounts.AddRange(GetLoginUsersAccounts(loginUsers));
         accounts.AddRange(GetConfigAccounts(Path.Combine(paths.ConfigPath, "config.vdf")));
-        return NormalizeLoginAccounts(accounts);
+
+        var normalized = NormalizeLoginAccounts(accounts);
+        PopulateConnectCacheTokens(paths, normalized);
+        return normalized;
     }
 
     public void UpdateLoginFiles(
@@ -53,10 +56,24 @@ internal sealed class SteamConfigService
         var loginUsersPath = Path.Combine(paths.ConfigPath, "loginusers.vdf");
 
         UpdateConfigVdf(configPath, account.AccountName, account.SteamId);
-        AppLog.Info($"Restored config.vdf ({FileLength(configPath)} bytes): \"{configPath}\"");
+        AppLog.Info($"已恢复 config.vdf（{FileLength(configPath)} 字节）：\"{configPath}\"");
 
         RestoreLoginUsersVdf(loginUsersPath, account);
-        AppLog.Info($"Restored loginusers.vdf ({FileLength(loginUsersPath)} bytes): \"{loginUsersPath}\"");
+        AppLog.Info($"已恢复 loginusers.vdf（{FileLength(loginUsersPath)} 字节）：\"{loginUsersPath}\"");
+
+        // 写回原账号的 ConnectCache 令牌：有它 Steam 才能免密自动登录；缺失则只能预选账号、仍需手动登录。
+        if (!string.IsNullOrWhiteSpace(account.ConnectCacheToken))
+        {
+            UpdateLocalVdf(
+                paths.LocalVdfPath,
+                Crc32.ComputeSteamAccountKey(account.AccountName),
+                account.ConnectCacheToken);
+            AppLog.Info($"已恢复 local.vdf ConnectCache（{FileLength(paths.LocalVdfPath)} 字节）：\"{paths.LocalVdfPath}\"");
+        }
+        else
+        {
+            AppLog.Warn("缓存账号缺少 ConnectCache 令牌，恢复后 Steam 可能需要手动登录。");
+        }
     }
 
     private static long FileLength(string path)
@@ -133,9 +150,13 @@ internal sealed class SteamConfigService
 
         var restoredUser = EnsureObject(users, account.SteamId);
         restoredUser["AccountName"] = account.AccountName;
-        restoredUser["PersonaName"] = string.IsNullOrWhiteSpace(GetString(restoredUser, "PersonaName"))
-            ? account.AccountName
-            : restoredUser["PersonaName"];
+        // 优先保留 loginusers.vdf 里既有昵称，其次用缓存到的 Steam 昵称，最后才退回登录名。
+        var existingPersona = GetString(restoredUser, "PersonaName");
+        restoredUser["PersonaName"] = !string.IsNullOrWhiteSpace(existingPersona)
+            ? existingPersona
+            : !string.IsNullOrWhiteSpace(account.PersonaName)
+                ? account.PersonaName
+                : account.AccountName;
         restoredUser["RememberPassword"] = "1";
         restoredUser["WantsOfflineMode"] = "0";
         restoredUser["SkipOfflineModeWarning"] = "0";
@@ -205,7 +226,7 @@ internal sealed class SteamConfigService
 
         if (string.IsNullOrWhiteSpace(accountName))
         {
-            AppLog.Warn($"Found active Steam user {steamId}, but could not resolve its account name.");
+            AppLog.Warn($"找到活动 Steam 用户 {steamId}，但无法解析其账户名。");
             return null;
         }
 
@@ -215,6 +236,45 @@ internal sealed class SteamConfigService
             SteamId = steamId,
             CachedAt = DateTimeOffset.Now
         };
+    }
+
+    // 在 EYA 登录覆盖 local.vdf 之前，把每个账号的 ConnectCache 令牌（crc32(账户名)+"1"）抓出来随账号缓存，
+    // 恢复时写回 local.vdf 才能让 Steam 免密自动登录。读不到（账号已被 Steam 忘记/令牌已轮换）时保持 null，
+    // 恢复退化为仅预选账号。local.vdf 解析失败时 GetPath 返回 null，整体跳过，best-effort。
+    private static void PopulateConnectCacheTokens(
+        SteamPaths paths,
+        IReadOnlyList<CachedSteamLoginAccount> accounts)
+    {
+        if (accounts.Count == 0)
+        {
+            return;
+        }
+
+        var connectCache = GetPath(
+            VdfDocument.LoadOrEmpty(paths.LocalVdfPath),
+            "MachineUserConfigStore",
+            "Software",
+            "Valve",
+            "Steam",
+            "ConnectCache");
+        if (connectCache is null)
+        {
+            return;
+        }
+
+        foreach (var account in accounts)
+        {
+            if (string.IsNullOrWhiteSpace(account.AccountName))
+            {
+                continue;
+            }
+
+            var token = GetString(connectCache, Crc32.ComputeSteamAccountKey(account.AccountName));
+            if (!string.IsNullOrWhiteSpace(token))
+            {
+                account.ConnectCacheToken = token;
+            }
+        }
     }
 
     private static IEnumerable<CachedSteamLoginAccount> GetLoginUsersAccounts(
