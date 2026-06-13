@@ -13,10 +13,13 @@ internal enum SteamEresult
 {
     Ok = 1,
     InvalidPassword = 5,
+    LoggedInElsewhere = 6,
     InvalidParam = 8,
     AccessDenied = 15,
     Revoked = 26,
     Expired = 27,
+    LogonSessionReplaced = 34,
+    AlreadyLoggedInElsewhere = 50,
     AccountLogonDenied = 63
 }
 
@@ -93,6 +96,7 @@ internal sealed class SteamCmClient : IAsyncDisposable
     private Task? _receiveTask;
     private Timer? _heartbeatTimer;
     private TaskCompletionSource<LogonResponse>? _logonResponse;
+    private Action<SteamGcClientMessage>? _gcMessageTap;
     private int _sessionId;
     private ulong _steamId;
     private ulong _currentJobId = (ulong)RandomNumberGenerator.GetInt32(1, int.MaxValue);
@@ -220,7 +224,7 @@ internal sealed class SteamCmClient : IAsyncDisposable
         byte[] payload,
         CancellationToken cancellationToken)
     {
-        var gcPayload = BuildGcProtobufPayload(msgType, payload);
+        var gcPayload = BuildGcProtobufPayload(appId, msgType, payload);
         var body = SteamProtoWriter.Build(writer =>
         {
             writer.WriteUInt32(1, appId);
@@ -236,6 +240,11 @@ internal sealed class SteamCmClient : IAsyncDisposable
             realm: null,
             cancellationToken,
             routingAppId: appId);
+    }
+
+    public void SetGcMessageTap(Action<SteamGcClientMessage>? tap)
+    {
+        _gcMessageTap = tap;
     }
 
     public async Task<SteamGcClientMessage> WaitForGcMessageAsync(
@@ -643,7 +652,7 @@ internal sealed class SteamCmClient : IAsyncDisposable
                 break;
 
             case EMsgClientLoggedOff:
-                FailPendingRequests(new InvalidOperationException("Steam 账号已下线。"));
+                FailPendingRequests(CreateLoggedOffException(body));
                 break;
 
             case EMsgClientFromGC:
@@ -687,8 +696,15 @@ internal sealed class SteamCmClient : IAsyncDisposable
         }
 
         var msgType = rawMsgType.Value & ~ProtoMask;
-        var messageBody = ExtractGcMessageBody(rawMsgType.Value, payload);
+        var messageBody = ExtractGcMessageBody(rawMsgType.Value, payload, out var gcClientSessionId);
+        if (gcClientSessionId is > 0)
+        {
+            _sessionId = gcClientSessionId.Value;
+        }
+
         var message = new SteamGcClientMessage(appId.Value, msgType, messageBody);
+        _gcMessageTap?.Invoke(message);
+
         var key = GetGcWaiterKey(appId.Value, msgType);
         TaskCompletionSource<SteamGcClientMessage>? waiter = null;
 
@@ -829,6 +845,44 @@ internal sealed class SteamCmClient : IAsyncDisposable
         return jobId == JobIdNone ? Interlocked.Increment(ref _currentJobId) : jobId;
     }
 
+    private static InvalidOperationException CreateLoggedOffException(byte[] body)
+    {
+        var reason = TryDecodeLoggedOffEresult(body);
+        if (reason is (int)SteamEresult.LoggedInElsewhere
+            or (int)SteamEresult.LogonSessionReplaced
+            or (int)SteamEresult.AlreadyLoggedInElsewhere)
+        {
+            return new InvalidOperationException(
+                "Steam CM 连接已被顶替：该账号可能正在 Steam 客户端或 CS2 中运行。" +
+                "请先完全退出 CS2 和 Steam，再在 SteamEYA 中执行配装操作。");
+        }
+
+        return new InvalidOperationException(
+            "Steam 账号已下线。" +
+            (reason.HasValue ? $"（EResult={reason.Value}）" : string.Empty));
+    }
+
+    private static int? TryDecodeLoggedOffEresult(byte[] body)
+    {
+        if (body.Length == 0)
+        {
+            return null;
+        }
+
+        var reader = new SteamProtoReader(body);
+        while (reader.TryReadTag(out var field, out var wireType))
+        {
+            if (field == 1)
+            {
+                return (int)reader.ReadVarint(wireType);
+            }
+
+            reader.Skip(wireType);
+        }
+
+        return null;
+    }
+
     private void FailPendingRequests(Exception ex)
     {
         _logonResponse?.TrySetException(ex);
@@ -891,10 +945,20 @@ internal sealed class SteamCmClient : IAsyncDisposable
         return stream.ToArray();
     }
 
-    private static byte[] BuildGcProtobufPayload(uint msgType, byte[] payload)
+    private byte[] BuildGcProtobufPayload(uint appId, uint msgType, byte[] payload)
     {
+        var jobId = _currentJobId++;
         var header = SteamProtoWriter.Build(writer =>
-            writer.WriteFixed64(10, JobIdNone));
+        {
+            writer.WriteFixed64(1, _steamId);
+            if (_sessionId != 0)
+            {
+                writer.WriteInt32(2, _sessionId);
+            }
+
+            writer.WriteUInt32(3, appId);
+            writer.WriteFixed64(10, jobId);
+        });
 
         var packet = new byte[8 + header.Length + payload.Length];
         BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(0, 4), msgType | ProtoMask);
@@ -904,8 +968,9 @@ internal sealed class SteamCmClient : IAsyncDisposable
         return packet;
     }
 
-    private static byte[] ExtractGcMessageBody(uint rawMsgType, byte[] payload)
+    private static byte[] ExtractGcMessageBody(uint rawMsgType, byte[] payload, out int? gcClientSessionId)
     {
+        gcClientSessionId = null;
         var isProto = (rawMsgType & ProtoMask) != 0;
         if (isProto)
         {
@@ -920,6 +985,7 @@ internal sealed class SteamCmClient : IAsyncDisposable
                 return Array.Empty<byte>();
             }
 
+            gcClientSessionId = TryReadGcClientSessionId(payload.AsSpan(8, headerLength));
             return payload[(8 + headerLength)..];
         }
 
@@ -927,6 +993,23 @@ internal sealed class SteamCmClient : IAsyncDisposable
         return payload.Length > gcBinaryHeaderLength
             ? payload[gcBinaryHeaderLength..]
             : Array.Empty<byte>();
+    }
+
+    private static int? TryReadGcClientSessionId(ReadOnlySpan<byte> headerBytes)
+    {
+        var reader = new SteamProtoReader(headerBytes.ToArray());
+        while (reader.TryReadTag(out var field, out var wireType))
+        {
+            if (field == 2)
+            {
+                var sessionId = (int)reader.ReadVarint(wireType);
+                return sessionId == 0 ? null : sessionId;
+            }
+
+            reader.Skip(wireType);
+        }
+
+        return null;
     }
 
     private static string GetGcWaiterKey(uint appId, uint msgType)

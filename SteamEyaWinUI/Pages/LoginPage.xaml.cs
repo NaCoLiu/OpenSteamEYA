@@ -50,6 +50,7 @@ public sealed partial class LoginPage : Page
         LicenseKeyBox.IsEnabled = enabled;
         ResolveLicenseButton.IsEnabled = enabled;
         ClearWorkshopButton.IsEnabled = enabled;
+        EquipR8Button.IsEnabled = enabled;
         LoginButton.IsEnabled = enabled;
         OneClickQueryButton.IsEnabled = enabled;
 
@@ -75,6 +76,43 @@ public sealed partial class LoginPage : Page
         ShowStatus(
             $"已载入历史账号：{account.AccountName}，上次登录 {FormatHelper.FormatDateTime(account.LastLoginAt)}。",
             InfoBarSeverity.Informational);
+    }
+
+    private async void EquipR8Button_Click(object sender, RoutedEventArgs e)
+    {
+        var cancellationToken = AppState.BeginBusyOperation();
+
+        try
+        {
+            var (accountName, eyaToken) = await GetCredentialsAsync();
+            EnsureTokenValidForAction(eyaToken, "装备 R8 配装");
+            UpdateAccountInfo(accountName, eyaToken);
+            await UpdateAccountProfileAsync(accountName, eyaToken);
+
+            var tokenInfo = AppState.JwtTokenService.Inspect(eyaToken);
+            var steamId = tokenInfo.SteamId
+                ?? throw new InvalidOperationException("EYA 令牌缺少 SteamID，无法修改配装。");
+            var result = await AppState.LoadoutService.EquipR8Async(
+                eyaToken,
+                steamId,
+                cancellationToken);
+
+            ShowStatus(
+                result.IsSuccess ? "R8 配装成功。" : result.ErrorMessage ?? "R8 配装失败。",
+                result.IsSuccess ? InfoBarSeverity.Success : InfoBarSeverity.Error);
+        }
+        catch (OperationCanceledException)
+        {
+            ShowStatus("已取消装备 R8 配装。", InfoBarSeverity.Informational);
+        }
+        catch (Exception ex)
+        {
+            ShowStatus(ex.Message, InfoBarSeverity.Error);
+        }
+        finally
+        {
+            AppState.EndBusyOperation();
+        }
     }
 
     private async void ClearWorkshopButton_Click(object sender, RoutedEventArgs e)

@@ -5,16 +5,11 @@ namespace SteamEyaWinUI.Services;
 
 internal sealed class CsPremierScoreService
 {
-    private const uint Cs2AppId = 730;
-    private const uint ClientHello = 4006;
-    private const uint ClientWelcome = 4004;
     private const uint ClientRequestPlayersProfile = 9127;
     private const uint PlayersProfile = 9128;
     private const uint MatchmakingClient2GCHello = 9109;
     private const uint MatchmakingGC2ClientHello = 9110;
     private const uint PremierRankTypeId = 11;
-    private const uint CsClientVersion = 2_000_244;
-
     // 9110 可能在 GC welcome 前后主动下发；等待必须覆盖握手窗口，接收层也会缓存早到消息。
     // 仍保留“断开 GC 再重连”循环触发（与 cooldown.js 一致：6 轮、每轮等 11 秒、
     // 断开后 2.5 秒再重连），另设总时限兜底防止单轮 GC welcome 重试拖长整体耗时。
@@ -39,33 +34,33 @@ internal sealed class CsPremierScoreService
             throw new InvalidOperationException("Steam64 格式不正确，无法查询优先分。");
         }
 
-        var accountId = GetAccountId(steamId64);
+        var accountId = CsGcSession.GetAccountId(steamId64);
         await using var cmClient = new SteamCmClient(HttpClient);
         await cmClient.ConnectAndLogOnAsync(refreshToken, steamId, cancellationToken);
 
         try
         {
             var helloTask = WaitForMatchmakingHelloAsync(cmClient, cancellationToken);
-            await cmClient.SetGamesPlayedAsync([Cs2AppId], cancellationToken);
-            await ConnectToGameCoordinatorAsync(cmClient, cancellationToken);
+            await cmClient.SetGamesPlayedAsync([CsGcSession.Cs2AppId], cancellationToken);
+            await CsGcSession.ConnectAsync(cmClient, cancellationToken);
 
             // 冷却/VAC 只能从 GC 的 MatchmakingGC2ClientHello(9110) 拿：PlayersProfile 对自己
             // 账号的 penalty 字段永远为空。9110 waiter 已在进 730 前挂好，避免 welcome 阶段
             // 主动下发的 9110 被错过；这里再发 9109 请求，随后照常请求 PlayersProfile 取优先分/等级。
             await cmClient.SendGcProtobufMessageAsync(
-                Cs2AppId,
+                CsGcSession.Cs2AppId,
                 MatchmakingClient2GCHello,
                 [],
                 cancellationToken);
 
             var profileTask = cmClient.WaitForGcMessageAsync(
-                Cs2AppId,
+                CsGcSession.Cs2AppId,
                 PlayersProfile,
                 TimeSpan.FromSeconds(30),
                 cancellationToken);
 
             await cmClient.SendGcProtobufMessageAsync(
-                Cs2AppId,
+                CsGcSession.Cs2AppId,
                 ClientRequestPlayersProfile,
                 EncodePlayersProfileRequest(accountId),
                 cancellationToken);
@@ -91,8 +86,8 @@ internal sealed class CsPremierScoreService
                     await cmClient.SetGamesPlayedAsync([], cancellationToken);
                     await Task.Delay(GcReconnectDelay, cancellationToken);
                     helloTask = WaitForMatchmakingHelloAsync(cmClient, cancellationToken);
-                    await cmClient.SetGamesPlayedAsync([Cs2AppId], cancellationToken);
-                    await ConnectToGameCoordinatorAsync(cmClient, cancellationToken);
+                    await cmClient.SetGamesPlayedAsync([CsGcSession.Cs2AppId], cancellationToken);
+                    await CsGcSession.ConnectAsync(cmClient, cancellationToken);
                 }
                 catch (TimeoutException)
                 {
@@ -101,7 +96,7 @@ internal sealed class CsPremierScoreService
                 }
 
                 await cmClient.SendGcProtobufMessageAsync(
-                    Cs2AppId,
+                    CsGcSession.Cs2AppId,
                     MatchmakingClient2GCHello,
                     [],
                     cancellationToken);
@@ -156,7 +151,7 @@ internal sealed class CsPremierScoreService
         try
         {
             var message = await cmClient.WaitForGcMessageAsync(
-                Cs2AppId,
+                CsGcSession.Cs2AppId,
                 MatchmakingGC2ClientHello,
                 timeout,
                 cancellationToken,
@@ -167,53 +162,6 @@ internal sealed class CsPremierScoreService
         {
             return null;
         }
-    }
-
-    private static async Task ConnectToGameCoordinatorAsync(
-        SteamCmClient cmClient,
-        CancellationToken cancellationToken)
-    {
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(45);
-
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var welcomeTask = cmClient.WaitForGcMessageAsync(
-                Cs2AppId,
-                ClientWelcome,
-                TimeSpan.FromSeconds(4),
-                cancellationToken);
-
-            await cmClient.SendGcProtobufMessageAsync(
-                Cs2AppId,
-                ClientHello,
-                EncodeClientHello(),
-                cancellationToken);
-
-            try
-            {
-                await welcomeTask;
-                return;
-            }
-            catch (TimeoutException)
-            {
-                // The GC often needs more than one hello after launching CS2.
-            }
-        }
-
-        throw new TimeoutException("连接 CS2 Game Coordinator 超时，暂时无法查询优先分。");
-    }
-
-    private static byte[] EncodeClientHello()
-    {
-        return SteamProtoWriter.Build(writer =>
-        {
-            writer.WriteUInt32(1, CsClientVersion);
-            writer.WriteUInt32(3, 0);
-            writer.WriteUInt32(4, 0);
-            writer.WriteUInt32(9, 0);
-        });
     }
 
     private static byte[] EncodePlayersProfileRequest(uint accountId)
@@ -367,11 +315,6 @@ internal sealed class CsPremierScoreService
         }
 
         return null;
-    }
-
-    private static uint GetAccountId(ulong steamId64)
-    {
-        return (uint)(steamId64 & 0xFFFFFFFF);
     }
 
     private sealed record CsAccountProfile(

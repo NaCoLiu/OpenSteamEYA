@@ -16,6 +16,7 @@ internal static class AppState
     public static SteamTokenOnlineValidationService TokenOnlineValidationService { get; } = new();
     public static AccountHistoryService AccountHistoryService { get; } = new();
     public static CsPremierScoreService PremierScoreService { get; } = new();
+    public static CsLoadoutService LoadoutService { get; } = new();
     public static GitHubUpdateService UpdateService { get; } = new();
 
     /// <summary>由 MainWindow 注入，向全局状态栏输出消息。</summary>

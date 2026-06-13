@@ -112,7 +112,11 @@
                     </StackPanel>
                 </Border>
 
-                <Grid ColumnSpacing="12">
+                <Grid RowSpacing="12" ColumnSpacing="12">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="*" />
@@ -140,6 +144,20 @@
                         <StackPanel Orientation="Horizontal" Spacing="8">
                             <FontIcon Glyph="&#xE8D4;" FontSize="16" />
                             <TextBlock Text="登录到 Steam" />
+                        </StackPanel>
+                    </Button>
+
+                    <Button
+                        x:Name="EquipR8Button"
+                        Grid.Row="1"
+                        Grid.ColumnSpan="2"
+                        HorizontalAlignment="Stretch"
+                        Padding="0,10"
+                        Click="EquipR8Button_Click"
+                        ToolTipService.ToolTip="将 R8 左轮加入 T/CT 配装">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <FontIcon Glyph="&#xE945;" FontSize="16" />
+                            <TextBlock Text="装备 R8 到 CT/T 配装" />
                         </StackPanel>
                     </Button>
                 </Grid>
