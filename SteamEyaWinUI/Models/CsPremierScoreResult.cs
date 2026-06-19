@@ -20,7 +20,8 @@ public sealed record CsPremierScoreResult(
 
     public bool HasCooldownData => PenaltySeconds.HasValue;
 
-    public bool HasCooldown => PenaltySeconds is > 0;
+    // 上限 int.MaxValue：超过则是“负的剩余秒数”被当无符号读出的天文数字（冷却其实已过期），不算有冷却。
+    public bool HasCooldown => PenaltySeconds is > 0 and <= int.MaxValue;
 
     public bool IsGcVacBanned => VacBanned is not (null or 0);
 

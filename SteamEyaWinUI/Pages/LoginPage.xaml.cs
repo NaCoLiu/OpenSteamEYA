@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.IO;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -50,6 +51,8 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
     internal LocalizedStrings Strings => Loc.Strings;
 
     private bool IsAutoMode => ModeSelector.SelectedItem == AutoModeItem;
+
+    private bool IsCredsMode => ModeSelector.SelectedItem == CredsModeItem;
 
     private void OnLanguageChanged()
     {
@@ -166,6 +169,179 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
         {
             AppState.EndBusyOperation();
         }
+    }
+
+    // 一键个性化：用「个性化」页保存的昵称 + 头像，把当前账号资料设置成这套。
+    private async void PersonalizeButton_Click(object sender, RoutedEventArgs e)
+    {
+        var settings = AppState.SettingsService.Load();
+        var personaName = settings.PersonaName;
+        var avatarPath = AppState.SettingsService.PersonalizationAvatarPath;
+        var hasName = !string.IsNullOrWhiteSpace(personaName);
+        var hasAvatar = File.Exists(avatarPath);
+
+        if (!hasName && !hasAvatar)
+        {
+            ShowStatus(Loc.T("Login_Personalize_Empty"), InfoBarSeverity.Warning);
+            return;
+        }
+
+        var cancellationToken = AppState.BeginBusyOperation();
+
+        var progress = new Progress<string>(message =>
+            ShowStatus(message, InfoBarSeverity.Informational));
+
+        try
+        {
+            var (accountName, eyaToken) = await GetCredentialsAsync();
+            EnsureTokenValidForAction(eyaToken, "Login_Action_Personalize");
+            UpdateAccountInfo(accountName, eyaToken);
+
+            var result = await AppState.ProfileService.ApplyAsync(
+                eyaToken,
+                hasName ? personaName : null,
+                hasAvatar ? avatarPath : null,
+                progress,
+                cancellationToken);
+
+            if (result.IsFullSuccess)
+            {
+                ShowStatus(Loc.T("Login_Status_Personalized"), InfoBarSeverity.Success);
+            }
+            else
+            {
+                var errors = new List<string>();
+                if (result.NameRequested && !result.NameApplied)
+                {
+                    errors.Add(result.NameError ?? Loc.T("Profile_Error_Unknown"));
+                }
+
+                if (result.AvatarRequested && !result.AvatarApplied)
+                {
+                    errors.Add(result.AvatarError ?? Loc.T("Profile_Error_Unknown"));
+                }
+
+                ShowStatus(
+                    Loc.Tf("Login_Status_PersonalizePartial_Format", string.Join("; ", errors)),
+                    InfoBarSeverity.Warning);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            ShowStatus(Loc.T("Login_Status_PersonalizeCancelled"), InfoBarSeverity.Informational);
+        }
+        catch (SteamCmException ex) when (ex.IsTokenFailure)
+        {
+            AccountInfoAvailabilityText.Text = Loc.T("Login_Availability_Invalid");
+            AccountInfoAvailabilityText.Foreground = FormatHelper.GetStatusBrush(InfoBarSeverity.Error);
+            ShowStatus(ex.Message, InfoBarSeverity.Error);
+        }
+        catch (Exception ex)
+        {
+            ShowStatus(ex.Message, InfoBarSeverity.Error);
+        }
+        finally
+        {
+            AppState.EndBusyOperation();
+        }
+    }
+
+    // 账密模式（调试）：用账号密码经 Web API 换取 EYA 令牌，存入历史并填进手动模式。
+    private async void CredFetchButton_Click(object sender, RoutedEventArgs e)
+    {
+        var accountName = CredAccountNameBox.Text.Trim();
+        var password = CredPasswordBox.Password;
+
+        if (string.IsNullOrWhiteSpace(accountName))
+        {
+            ShowStatus(Loc.T("Creds_Error_AccountRequired"), InfoBarSeverity.Warning);
+            return;
+        }
+
+        if (string.IsNullOrEmpty(password))
+        {
+            ShowStatus(Loc.T("Creds_Error_PasswordRequired"), InfoBarSeverity.Warning);
+            return;
+        }
+
+        var cancellationToken = AppState.BeginBusyOperation();
+        var progress = new Progress<string>(message =>
+            ShowStatus(message, InfoBarSeverity.Informational));
+
+        try
+        {
+            var result = await AppState.CredentialsAuthService.GetRefreshTokenAsync(
+                accountName, password, PromptGuardCodeAsync, progress, cancellationToken);
+
+            var token = FormatHelper.NormalizeToken(result.RefreshToken);
+            var info = AppState.JwtTokenService.Inspect(token);
+
+            // 保存到历史账号。
+            await AppState.AccountHistoryService.SaveLoginAsync(
+                result.AccountName, result.SteamId, token, info.ExpiresAt);
+            AppState.ReloadHistory(result.SteamId);
+
+            // 填进手动模式并切过去，方便接着上号/查询；清空密码不留存。
+            _suppressModeStatus = true;
+            ModeSelector.SelectedItem = ManualModeItem;
+            _suppressModeStatus = false;
+            AccountNameBox.Text = result.AccountName;
+            EyaTokenBox.Text = token;
+            CredPasswordBox.Password = string.Empty;
+            UpdateAccountInfo(result.AccountName, token);
+
+            ShowStatus(Loc.Tf("Creds_Status_Saved_Format", result.AccountName), InfoBarSeverity.Success);
+        }
+        catch (OperationCanceledException)
+        {
+            ShowStatus(Loc.T("Creds_Status_Cancelled"), InfoBarSeverity.Informational);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("账密获取 EYA 令牌失败。", ex);
+            ShowStatus(ex.Message, InfoBarSeverity.Error);
+        }
+        finally
+        {
+            AppState.EndBusyOperation();
+        }
+    }
+
+    // 令牌验证器需要输码时，弹窗向用户索取邮箱/手机验证码；取消返回 null。
+    private async Task<string?> PromptGuardCodeAsync(SteamGuardPrompt prompt, CancellationToken cancellationToken)
+    {
+        var isMobile = prompt.Type == SteamGuardType.DeviceCode;
+
+        var codeBox = new TextBox
+        {
+            PlaceholderText = Loc.T("Creds_Guard_CodePlaceholder"),
+            IsSpellCheckEnabled = false,
+            MaxLength = 10,
+            Margin = new Thickness(0, 12, 0, 0)
+        };
+
+        var panel = new StackPanel { Spacing = 4 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = string.IsNullOrWhiteSpace(prompt.AssociatedMessage)
+                ? Loc.T(isMobile ? "Creds_Guard_MobileMessage" : "Creds_Guard_EmailMessage")
+                : prompt.AssociatedMessage,
+            TextWrapping = TextWrapping.Wrap
+        });
+        panel.Children.Add(codeBox);
+
+        var dialog = new ContentDialog
+        {
+            Title = Loc.T(isMobile ? "Creds_Guard_MobileTitle" : "Creds_Guard_EmailTitle"),
+            Content = panel,
+            PrimaryButtonText = Loc.T("Common_Confirm"),
+            CloseButtonText = Loc.T("Common_Cancel"),
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = XamlRoot
+        };
+
+        var result = await dialog.ShowAsync();
+        return result == ContentDialogResult.Primary ? codeBox.Text.Trim() : null;
     }
 
     private async void ClearWorkshopButton_Click(object sender, RoutedEventArgs e)
@@ -353,7 +529,7 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
 
     private void ModeSelector_SelectionChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args)
     {
-        if (ManualPanel is null || AutoPanel is null)
+        if (ManualPanel is null || AutoPanel is null || CredsPanel is null || ActionButtonGrid is null)
         {
             return;
         }
@@ -363,15 +539,22 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
 
         if (!_suppressModeStatus)
         {
-            ShowStatus(IsAutoMode ? Loc.T("Login_Status_AutoModeEnabled") : Loc.T("Login_Status_ManualModeEnabled"), InfoBarSeverity.Informational);
+            var statusKey = IsCredsMode
+                ? "Login_Status_CredsModeEnabled"
+                : IsAutoMode ? "Login_Status_AutoModeEnabled" : "Login_Status_ManualModeEnabled";
+            ShowStatus(Loc.T(statusKey), InfoBarSeverity.Informational);
         }
     }
 
     private void ApplyModeVisibility()
     {
-        var isAutoMode = IsAutoMode;
-        ManualPanel.Visibility = isAutoMode ? Visibility.Collapsed : Visibility.Visible;
-        AutoPanel.Visibility = isAutoMode ? Visibility.Visible : Visibility.Collapsed;
+        var auto = IsAutoMode;
+        var creds = IsCredsMode;
+        ManualPanel.Visibility = (!auto && !creds) ? Visibility.Visible : Visibility.Collapsed;
+        AutoPanel.Visibility = auto ? Visibility.Visible : Visibility.Collapsed;
+        CredsPanel.Visibility = creds ? Visibility.Visible : Visibility.Collapsed;
+        // 账密模式只用面板内的「获取令牌」按钮，下方上号/查询等动作按钮无意义，隐藏。
+        ActionButtonGrid.Visibility = creds ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>
@@ -380,8 +563,9 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
     /// </summary>
     private void ApplyLanguageModeAvailability()
     {
+        // 自动模式（卡密）只对接中文上游，英文界面隐藏该 tab；手动 / 账密 tab 始终可用。
         var autoAvailable = !string.Equals(Loc.CurrentCode, "en", StringComparison.OrdinalIgnoreCase);
-        ModeSelector.Visibility = autoAvailable ? Visibility.Visible : Visibility.Collapsed;
+        AutoModeItem.Visibility = autoAvailable ? Visibility.Visible : Visibility.Collapsed;
 
         // 当前在自动模式却要隐藏它：切回手动（不弹模式切换提示）。
         if (!autoAvailable && IsAutoMode)
@@ -699,6 +883,13 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
     {
         if (AccountInfoUserText is null)
         {
+            return;
+        }
+
+        if (IsCredsMode)
+        {
+            // 账密模式还没有令牌，右侧账号信息面板清空。
+            UpdateAccountInfo(null, null);
             return;
         }
 

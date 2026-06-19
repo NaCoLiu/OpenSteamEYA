@@ -75,6 +75,13 @@
                         <FontIcon Glyph="&#xE7C1;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem
+                    x:Name="PersonalizationNavItem"
+                    Tag="personalization">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE779;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
             </NavigationView.MenuItems>
             <NavigationView.FooterMenuItems>
                 <NavigationViewItem

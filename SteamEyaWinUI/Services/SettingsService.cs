@@ -27,6 +27,9 @@ internal sealed class SettingsService
     /// <summary>数据根目录（%AppData%\SteamEYA），供“打开数据目录”使用。</summary>
     public string AppFolderPath { get; }
 
+    /// <summary>「个性化」头像的固定落盘路径（裁剪后的 512² JPEG）。</summary>
+    public string PersonalizationAvatarPath => Path.Combine(AppFolderPath, "personalization", "avatar.jpg");
+
     public AppSettings Load()
     {
         lock (_gate)
@@ -98,6 +101,9 @@ internal sealed class AppSettings
 
     /// <summary>唯一的 CS2 配装预设，供装备页面编辑与登录页一键装配。新用户用项目内置默认配装。</summary>
     public CsLoadoutPreset Loadout { get; set; } = CsLoadoutPreset.Default();
+
+    /// <summary>「个性化」面板里设置的昵称，供登录页一键把账号资料设为该值。null/空表示不改昵称。</summary>
+    public string? PersonaName { get; set; }
 }
 
 // 与账号历史一致用 source generator：JsonSerializerDefaults.Web（camelCase、大小写不敏感），AOT 下可读写。

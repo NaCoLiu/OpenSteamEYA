@@ -96,7 +96,7 @@
                         Text="{x:Bind Strings.Get('About_Repo_Section'), Mode=OneWay}"
                         Style="{StaticResource SectionTitleTextStyle}" />
                     <TextBlock
-                        Text="https://github.com/tuntun1337/opensteameya"
+                        Text="https://github.com/hvh-software/OpenSteamEYA"
                         IsTextSelectionEnabled="True"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                         TextWrapping="Wrap" />

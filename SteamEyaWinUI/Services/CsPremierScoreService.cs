@@ -229,8 +229,14 @@ internal sealed class CsPremierScoreService
                     break;
 
                 case 4:
-                    penaltySeconds = (uint)reader.ReadVarint(wireType);
+                {
+                    // penalty_seconds 实为有符号：冷却已过期时 GC 下发“负的剩余秒数”，protobuf 把它符号扩展成
+                    // 64 位变长整型。直接当 uint 读会截成 ~2^32 的天文数字（曾把刚解封的账号显示成“49707天…”）。
+                    // 按 int32 解读，≤0（已过期 / 无冷却）一律归零。
+                    var penalty = unchecked((int)reader.ReadVarint(wireType));
+                    penaltySeconds = penalty > 0 ? (uint)penalty : 0;
                     break;
+                }
 
                 case 5:
                     penaltyReason = (uint)reader.ReadVarint(wireType);

@@ -104,6 +104,7 @@ public sealed partial class MainWindow : Window
             "history" => typeof(HistoryPage),
             "cachedAccounts" => typeof(CachedAccountsPage),
             "loadout" => typeof(LoadoutPage),
+            "personalization" => typeof(PersonalizationPage),
             "settings" => typeof(SettingsPage),
             "about" => typeof(AboutPage),
             _ => typeof(LoginPage)
@@ -145,6 +146,7 @@ public sealed partial class MainWindow : Window
         HistoryNavItem.Content = Loc.T("Nav_History");
         CachedAccountsNavItem.Content = Loc.T("Nav_CachedAccounts");
         LoadoutNavItem.Content = Loc.T("Nav_Loadout");
+        PersonalizationNavItem.Content = Loc.T("Nav_Personalization");
         SettingsNavItem.Content = Loc.T("Nav_Settings");
         AboutNavItem.Content = Loc.T("Nav_About");
     }

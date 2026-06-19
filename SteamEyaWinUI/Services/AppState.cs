@@ -18,6 +18,8 @@ internal static class AppState
     public static AccountHistoryService AccountHistoryService { get; } = new();
     public static CsPremierScoreService PremierScoreService { get; } = new();
     public static CsLoadoutService LoadoutService { get; } = new();
+    public static SteamProfileService ProfileService { get; } = new();
+    public static SteamCredentialsAuthService CredentialsAuthService { get; } = new();
     public static GitHubUpdateService UpdateService { get; } = new();
     public static SettingsService SettingsService { get; } = new();
 

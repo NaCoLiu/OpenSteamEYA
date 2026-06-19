@@ -16,9 +16,39 @@ public sealed partial class CachedSteamLoginAccount : INotifyPropertyChanged
 
     public string? PersonaName { get; set; }
 
-    public string? AvatarUrl { get; set; }
+    private string? _avatarUrl;
 
-    public string? AvatarPath { get; set; }
+    public string? AvatarUrl
+    {
+        get => _avatarUrl;
+        set
+        {
+            if (_avatarUrl == value)
+            {
+                return;
+            }
+
+            _avatarUrl = value;
+            InvalidateAvatar();
+        }
+    }
+
+    private string? _avatarPath;
+
+    public string? AvatarPath
+    {
+        get => _avatarPath;
+        set
+        {
+            if (_avatarPath == value)
+            {
+                return;
+            }
+
+            _avatarPath = value;
+            InvalidateAvatar();
+        }
+    }
 
     public DateTimeOffset CachedAt { get; set; }
 
@@ -65,6 +95,13 @@ public sealed partial class CachedSteamLoginAccount : INotifyPropertyChanged
     [JsonIgnore]
     public BitmapImage? AvatarImage => _avatarImage ??= LoadAvatarImage();
 
+    // 头像来源（路径/URL）变化时丢弃已解码缓存并通知绑定重取，使异步下载完成后头像即时出现（无需整列表重建）。
+    private void InvalidateAvatar()
+    {
+        _avatarImage = null;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(AvatarImage)));
+    }
+
     private BitmapImage? LoadAvatarImage()
     {
         var localPath = AvatarPath;
@@ -79,7 +116,14 @@ public sealed partial class CachedSteamLoginAccount : INotifyPropertyChanged
                 }
 
                 // 从字节解码而非 new BitmapImage(Uri)：后者会长期持有文件句柄，导致删除账号时头像删不掉。
-                var bytes = File.ReadAllBytes(localPath);
+                // 用 FileShare.ReadWrite 共享读：即便另一线程正在替换该头像文件，也不抛共享冲突导致头像闪失。
+                byte[] bytes;
+                using (var fileStream = new FileStream(
+                    localPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    bytes = new byte[fileStream.Length];
+                    fileStream.ReadExactly(bytes);
+                }
                 var bitmap = new BitmapImage { DecodePixelWidth = AvatarDecodePixelWidth };
                 using (var stream = new MemoryStream(bytes))
                 {

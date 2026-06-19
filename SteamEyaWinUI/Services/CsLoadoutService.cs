@@ -81,16 +81,11 @@ internal sealed class CsLoadoutService
                     current[(entry.ClassId, entry.SlotId)] = entry.ItemDefinition;
                 }
 
-                // 已是目标状态的槽位直接计为已确认（GC 不会回写未改动的槽，发了反而误报失败）；只发差异。
+                // 已是目标状态的槽位无需重发（GC 不会回写未改动的槽，发了反而误报失败）；只发差异。
                 var toSend = new List<(uint Team, uint Slot, uint Def)>();
-                var alreadyOk = 0;
                 foreach (var item in requested)
                 {
-                    if (current.TryGetValue((item.Team, item.Slot), out var cur) && cur == item.Def)
-                    {
-                        alreadyOk++;
-                    }
-                    else
+                    if (!(current.TryGetValue((item.Team, item.Slot), out var cur) && cur == item.Def))
                     {
                         toSend.Add(item);
                     }
@@ -144,17 +139,44 @@ internal sealed class CsLoadoutService
                     cmClient.SetGcMessageTap(null);
                 }
 
-                var verifiedSet = verifiedEntries
-                    .Select(e => (e.ClassId, e.SlotId, e.ItemDefinition))
-                    .ToHashSet();
+                // 用「初始全量状态 + 增量 SO 更新」合成最终状态做校验。旧逻辑只认抓到的增量 SO 消息，
+                // 漏接尾随更新、或 GC 以「还原默认槽」语义回包时，会把其实已装好的槽误报为失败（30 里只确认 18）。
+                var finalState = new Dictionary<(uint Team, uint Slot), uint>(current);
+                foreach (var entry in verifiedEntries)
+                {
+                    finalState[(entry.ClassId, entry.SlotId)] = entry.ItemDefinition;
+                }
+
+                bool AllRequestedSatisfied() => requested.All(item =>
+                    finalState.TryGetValue((item.Team, item.Slot), out var def) && def == item.Def);
+
+                // 仍有未达标的槽位时，重新拉一次 welcome 读回全量 SO 缓存兜底，消除纯时序导致的误报。
+                if (!AllRequestedSatisfied())
+                {
+                    try
+                    {
+                        var freshWelcome = await CsGcSession.RequestWelcomeAsync(
+                            cmClient,
+                            TimeSpan.FromSeconds(15),
+                            cancellationToken);
+                        foreach (var entry in CsSoCacheParser.ParseLoadoutFromWelcome(freshWelcome, accountId))
+                        {
+                            finalState[(entry.ClassId, entry.SlotId)] = entry.ItemDefinition;
+                        }
+                    }
+                    catch (TimeoutException)
+                    {
+                        // 兜底读回超时则沿用现有判定，不阻断结果返回。
+                    }
+                }
 
                 var failures = new List<string>();
-                var confirmedChanges = 0;
-                foreach (var (team, slot, def) in toSend)
+                var confirmed = 0;
+                foreach (var (team, slot, def) in requested)
                 {
-                    if (verifiedSet.Contains((team, slot, def)))
+                    if (finalState.TryGetValue((team, slot), out var cur) && cur == def)
                     {
-                        confirmedChanges++;
+                        confirmed++;
                     }
                     else
                     {
@@ -164,7 +186,7 @@ internal sealed class CsLoadoutService
                     }
                 }
 
-                var result = new CsLoadoutApplyResult(requested.Count, alreadyOk + confirmedChanges, failures);
+                var result = new CsLoadoutApplyResult(requested.Count, confirmed, failures);
                 AppLog.Info($"一键配装：请求 {result.Requested}，确认 {result.Confirmed}，失败 {failures.Count}。");
                 return result;
             }

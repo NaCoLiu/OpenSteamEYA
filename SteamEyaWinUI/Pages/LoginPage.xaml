@@ -29,6 +29,11 @@
                             <FontIcon Glyph="&#xE70F;" />
                         </SelectorBarItem.Icon>
                     </SelectorBarItem>
+                    <SelectorBarItem x:Name="CredsModeItem" Text="{x:Bind Strings.Get('Login_Mode_Creds'), Mode=OneWay}">
+                        <SelectorBarItem.Icon>
+                            <FontIcon Glyph="&#xE72E;" />
+                        </SelectorBarItem.Icon>
+                    </SelectorBarItem>
                     <SelectorBarItem x:Name="AutoModeItem" Text="{x:Bind Strings.Get('Login_Mode_Auto'), Mode=OneWay}">
                         <SelectorBarItem.Icon>
                             <FontIcon Glyph="&#xE945;" />
@@ -58,6 +63,41 @@
                             IsSpellCheckEnabled="False"
                             ScrollViewer.VerticalScrollBarVisibility="Auto"
                             TextChanged="ManualCredentialBox_TextChanged" />
+                    </StackPanel>
+                </Border>
+
+                <!-- 账密模式（调试）：用账号密码登录 Steam，换取 EYA 令牌并存入历史。 -->
+                <Border x:Name="CredsPanel" Style="{StaticResource CardBorderStyle}" Visibility="Collapsed">
+                    <StackPanel Spacing="14">
+                        <TextBlock Text="{x:Bind Strings.Get('Creds_Section'), Mode=OneWay}" Style="{StaticResource SectionTitleTextStyle}" />
+                        <TextBlock
+                            Text="{x:Bind Strings.Get('Creds_Section_Desc'), Mode=OneWay}"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            TextWrapping="Wrap" />
+
+                        <TextBox
+                            x:Name="CredAccountNameBox"
+                            Header="{x:Bind Strings.Get('Creds_Field_AccountName'), Mode=OneWay}"
+                            PlaceholderText="{x:Bind Strings.Get('Creds_Field_AccountName_Placeholder'), Mode=OneWay}"
+                            IsSpellCheckEnabled="False" />
+
+                        <PasswordBox
+                            x:Name="CredPasswordBox"
+                            Header="{x:Bind Strings.Get('Creds_Field_Password'), Mode=OneWay}"
+                            PlaceholderText="{x:Bind Strings.Get('Creds_Field_Password_Placeholder'), Mode=OneWay}" />
+
+                        <Button
+                            x:Name="CredFetchButton"
+                            HorizontalAlignment="Stretch"
+                            Padding="0,10"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Click="CredFetchButton_Click"
+                            ToolTipService.ToolTip="{x:Bind Strings.Get('Creds_Btn_Fetch_Tip'), Mode=OneWay}">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE898;" FontSize="16" />
+                                <TextBlock Text="{x:Bind Strings.Get('Creds_Btn_Fetch'), Mode=OneWay}" />
+                            </StackPanel>
+                        </Button>
                     </StackPanel>
                 </Border>
 
@@ -112,8 +152,9 @@
                     </StackPanel>
                 </Border>
 
-                <Grid RowSpacing="12" ColumnSpacing="12">
+                <Grid x:Name="ActionButtonGrid" RowSpacing="12" ColumnSpacing="12">
                     <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
@@ -159,6 +200,21 @@
                         <StackPanel Orientation="Horizontal" Spacing="8">
                             <FontIcon Glyph="&#xE7C1;" FontSize="16" />
                             <TextBlock Text="{x:Bind Strings.Get('Login_Btn_ApplyLoadout'), Mode=OneWay}" />
+                        </StackPanel>
+                    </Button>
+
+                    <!-- 一键个性化：用「个性化」页保存的昵称+头像，设置到当前账号资料。 -->
+                    <Button
+                        x:Name="PersonalizeButton"
+                        Grid.Row="2"
+                        Grid.ColumnSpan="2"
+                        HorizontalAlignment="Stretch"
+                        Padding="0,10"
+                        Click="PersonalizeButton_Click"
+                        ToolTipService.ToolTip="{x:Bind Strings.Get('Login_Btn_Personalize_Tip'), Mode=OneWay}">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <FontIcon Glyph="&#xE779;" FontSize="16" />
+                            <TextBlock Text="{x:Bind Strings.Get('Login_Btn_Personalize'), Mode=OneWay}" />
                         </StackPanel>
                     </Button>
                 </Grid>

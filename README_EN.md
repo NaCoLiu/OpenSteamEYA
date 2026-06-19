@@ -11,7 +11,7 @@ A Windows desktop tool for Steam account management/login with EYA tokens.
 
 SteamEYA uses EYA tokens, a type of Steam login credential, to replace traditional account username and password logins, without the need to manually enter the password or manage Steam authenticators. Besides the login function, it can also check account status such as Premier rank, CS2 account level, and cooldown status, manage previously logged-in accounts, and clear Workshop subscriptions to prevent large downloads after logging in to a new account.
 
-**👉 [Download the latest version from Releases](https://github.com/tuntun1337/opensteameya/releases)**
+**👉 [Download the latest version from Releases](https://github.com/hvh-software/OpenSteamEYA/releases)**
 
 ## Screenshots
 
@@ -61,7 +61,7 @@ Ships with Simplified Chinese, Traditional Chinese, and English. Switch anytime 
 
 ## Installation
 
-1. Download the latest `SteamEYA-<version>-win-x64.7z` from [Releases](https://github.com/tuntun1337/opensteameya/releases).
+1. Download the latest `SteamEYA-<version>-win-x64.7z` from [Releases](https://github.com/hvh-software/OpenSteamEYA/releases).
 2. Use [7-Zip](https://www.7-zip.org/) or NanaZip to **fully extract** the archive to a folder.
 3. Double-click `SteamEyaWinUI.exe` to run.
 
@@ -86,8 +86,8 @@ You need to fully exit the running Steam client before logging in. If Steam is r
 .NET 10 SDK and the Visual Studio C++ toolchain are required.
 
 ```bash
-git clone https://github.com/tuntun1337/opensteameya.git
-cd opensteameya
+git clone https://github.com/hvh-software/OpenSteamEYA.git
+cd OpenSteamEYA
 dotnet build SteamEyaWinUI/SteamEyaWinUI.csproj -c Release
 ```
 
@@ -96,11 +96,11 @@ dotnet build SteamEyaWinUI/SteamEyaWinUI.csproj -c Release
 If you are interested in this project, contributions are welcome. A Star is also appreciated ^_^ <br>
 Thanks to everyone who has opened and merged PRs for this project.
 
-<a href="https://github.com/tuntun1337/opensteameya/graphs/contributors" target="_blank">
+<a href="https://github.com/hvh-software/OpenSteamEYA/graphs/contributors" target="_blank">
   <table>
     <tr>
       <th colspan="2">
-        <br><img src="https://contrib.rocks/image?repo=tuntun1337/opensteameya"><br><br>
+        <br><img src="https://contrib.rocks/image?repo=hvh-software/OpenSteamEYA"><br><br>
       </th>
     </tr>
   </table>
@@ -118,11 +118,11 @@ This project is open source under the [MIT License](LICENSE).
 
 <!-- LINK GROUP -->
 
-[latest-version-shield]: https://img.shields.io/github/v/release/tuntun1337/opensteameya?style=flat-square&label=latest%20version&labelColor=black
-[latest-version-link]: https://github.com/tuntun1337/opensteameya/releases
-[github-downloads-shield]: https://img.shields.io/github/downloads/tuntun1337/opensteameya/total?style=flat-square&logo=github&label=downloads&labelColor=black
-[github-downloads-link]: https://github.com/tuntun1337/opensteameya/releases
-[github-stars-shield]: https://img.shields.io/github/stars/tuntun1337/opensteameya?style=flat-square&logo=github&labelColor=black
-[github-stars-link]: https://github.com/tuntun1337/opensteameya/stargazers
-[github-license-shield]: https://img.shields.io/github/license/tuntun1337/opensteameya?style=flat-square&logo=github&labelColor=black
-[github-license-link]: https://github.com/tuntun1337/opensteameya/blob/main/LICENSE
+[latest-version-shield]: https://img.shields.io/github/v/release/hvh-software/OpenSteamEYA?style=flat-square&label=latest%20version&labelColor=black
+[latest-version-link]: https://github.com/hvh-software/OpenSteamEYA/releases
+[github-downloads-shield]: https://img.shields.io/github/downloads/hvh-software/OpenSteamEYA/total?style=flat-square&logo=github&label=downloads&labelColor=black
+[github-downloads-link]: https://github.com/hvh-software/OpenSteamEYA/releases
+[github-stars-shield]: https://img.shields.io/github/stars/hvh-software/OpenSteamEYA?style=flat-square&logo=github&labelColor=black
+[github-stars-link]: https://github.com/hvh-software/OpenSteamEYA/stargazers
+[github-license-shield]: https://img.shields.io/github/license/hvh-software/OpenSteamEYA?style=flat-square&logo=github&labelColor=black
+[github-license-link]: https://github.com/hvh-software/OpenSteamEYA/blob/main/LICENSE

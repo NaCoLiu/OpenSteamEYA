@@ -1,5 +1,4 @@
 using System.Net;
-using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using SteamEyaWinUI.Localization;
 
@@ -7,9 +6,12 @@ namespace SteamEyaWinUI.Services;
 
 internal sealed partial class SteamWorkshopService
 {
-    private const uint AppId = 730;
-    private const int ListType = 1;
-    private const int DelayMs = 600;
+    // 要清理创意工坊订阅的游戏：730 = CS2，431960 = Wallpaper Engine。
+    private static readonly uint[] AppIds = [730, 431960];
+
+    // 取消订阅改为并发 HTTP（steamcommunity 的 unsubscribe 端点），比逐个走 CM 协议快很多。
+    // 限并发数，既快又不至于把 steamcommunity 打到限流。
+    private const int MaxConcurrentUnsubscribes = 5;
 
     private readonly JwtTokenService _jwtTokenService = new();
 
@@ -43,74 +45,93 @@ internal sealed partial class SteamWorkshopService
 
         progress?.Report(Loc.Tf("Workshop_Progress_LoggedIn_Format", token.SteamId));
         progress?.Report(Loc.T("Workshop_Progress_GettingWebSession"));
-        var cookieHeader = await GetWebSessionAsync(cmClient, eyaToken, token.SteamId, cancellationToken);
+        var session = await SteamWebSession.BuildAsync(cmClient, eyaToken, token.SteamId, cancellationToken);
 
         progress?.Report(Loc.T("Workshop_Progress_GettingSubscriptions"));
-        var (ids, titles) = await EnumerateSubscriptionsAsync(token.SteamId, cookieHeader, cancellationToken);
+        var items = new List<(uint AppId, string Id, string Title)>();
+        foreach (var appId in AppIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var (ids, titles) = await EnumerateSubscriptionsAsync(
+                appId, token.SteamId, session.CookieHeader, cancellationToken);
+            foreach (var id in ids)
+            {
+                items.Add((appId, id, titles.GetValueOrDefault(id, "")));
+            }
+        }
 
-        if (ids.Count == 0)
+        if (items.Count == 0)
         {
             progress?.Report(Loc.T("Workshop_Progress_NoSubscriptions"));
             return 0;
         }
 
-        progress?.Report(Loc.Tf("Workshop_Progress_FoundSubscriptions_Format", ids.Count));
+        progress?.Report(Loc.Tf("Workshop_Progress_FoundSubscriptions_Format", items.Count));
 
         var unsubscribed = 0;
-        for (var i = 0; i < ids.Count; i++)
+        var processed = 0;
+        using var throttle = new SemaphoreSlim(MaxConcurrentUnsubscribes);
+
+        async Task UnsubscribeOneAsync(uint appId, string id, string title)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var id = ids[i];
-            var title = titles.GetValueOrDefault(id, "");
-            var result = await cmClient.UnsubscribePublishedFileAsync(
-                ulong.Parse(id),
-                AppId,
-                ListType,
-                cancellationToken);
-
-            var gone = result == SteamEresult.Ok &&
-                !await cmClient.IsPublishedFileSubscribedAsync(
-                    ulong.Parse(id),
-                    AppId,
-                    ListType,
-                    cancellationToken);
-
-            if (gone)
+            await throttle.WaitAsync(cancellationToken);
+            try
             {
-                unsubscribed++;
-                progress?.Report(Loc.Tf("Workshop_Progress_ItemUnsubscribed_Format", i + 1, ids.Count, id, title));
+                cancellationToken.ThrowIfCancellationRequested();
+                var (ok, status) = await UnsubscribeViaWebAsync(
+                    appId, id, session.CookieHeader, session.SessionId, cancellationToken);
+                var current = Interlocked.Increment(ref processed);
+
+                if (ok)
+                {
+                    Interlocked.Increment(ref unsubscribed);
+                    progress?.Report(Loc.Tf("Workshop_Progress_ItemUnsubscribed_Format",
+                        current, items.Count, id, title));
+                }
+                else
+                {
+                    progress?.Report(Loc.Tf("Workshop_Progress_ItemFailed_Format",
+                        current, items.Count, id, title, status));
+                }
             }
-            else
+            finally
             {
-                progress?.Report(Loc.Tf("Workshop_Progress_ItemFailed_Format", i + 1, ids.Count, id, title, result));
-            }
-
-            if (i < ids.Count - 1)
-            {
-                await Task.Delay(DelayMs, cancellationToken);
+                throttle.Release();
             }
         }
 
-        progress?.Report(Loc.Tf("Workshop_Progress_Done_Format", unsubscribed, ids.Count - unsubscribed));
+        await Task.WhenAll(items.Select(item => UnsubscribeOneAsync(item.AppId, item.Id, item.Title)));
+
+        progress?.Report(Loc.Tf("Workshop_Progress_Done_Format", unsubscribed, items.Count - unsubscribed));
         return unsubscribed;
     }
 
-    private static async Task<string> GetWebSessionAsync(
-        SteamCmClient cmClient,
-        string refreshToken,
-        string steamId,
+    // 通过 steamcommunity 的 unsubscribe 端点取消单个订阅。POST 体里的 sessionid 必须与 cookie 里的一致。
+    // 句柄关闭了自动跳转：会话失效会被导向 3xx，IsSuccessStatusCode(2xx) 自然判为失败，不会误报成功。
+    private static async Task<(bool Ok, int Status)> UnsubscribeViaWebAsync(
+        uint appId,
+        string fileId,
+        string cookieHeader,
+        string sessionId,
         CancellationToken cancellationToken)
     {
-        var accessToken = await cmClient.GenerateAccessTokenForAppAsync(refreshToken, cancellationToken);
-        var steamLoginSecure = Uri.EscapeDataString($"{steamId}||{accessToken}");
-        var sessionId = RandomHex(12);
-        var clientSessionId = RandomHex(8);
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post, "https://steamcommunity.com/sharedfiles/unsubscribe");
+        request.Headers.Add("Cookie", cookieHeader);
+        request.Headers.Add("User-Agent", "Mozilla/5.0");
+        request.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["appid"] = appId.ToString(),
+            ["id"] = fileId,
+            ["sessionid"] = sessionId
+        });
 
-        return $"steamLoginSecure={steamLoginSecure}; sessionid={sessionId}; clientsessionid={clientSessionId}";
+        using var response = await HttpClient.SendAsync(request, cancellationToken);
+        return (response.IsSuccessStatusCode, (int)response.StatusCode);
     }
 
     private static async Task<(List<string> ids, Dictionary<string, string> titles)> EnumerateSubscriptionsAsync(
+        uint appId,
         string steamId,
         string cookieHeader,
         CancellationToken cancellationToken)
@@ -124,7 +145,7 @@ internal sealed partial class SteamWorkshopService
             cancellationToken.ThrowIfCancellationRequested();
 
             var url = $"https://steamcommunity.com/profiles/{steamId}/myworkshopfiles/"
-                + $"?appid={AppId}&browsefilter=mysubscriptions&numperpage=30&p={page}&l=english";
+                + $"?appid={appId}&browsefilter=mysubscriptions&numperpage=30&p={page}&l=english";
 
             using var response = await SendFollowingRedirectsAsync(
                 HttpMethod.Get,
@@ -164,11 +185,6 @@ internal sealed partial class SteamWorkshopService
         }
 
         return (ids, titles);
-    }
-
-    private static string RandomHex(int byteCount)
-    {
-        return Convert.ToHexString(RandomNumberGenerator.GetBytes(byteCount)).ToLowerInvariant();
     }
 
     /// <summary>

@@ -412,7 +412,11 @@ internal sealed class SteamLoginCacheService
 
             Directory.CreateDirectory(AvatarFolderPath);
             var avatarPath = Path.Combine(AvatarFolderPath, $"{GetSafeAvatarKey(steamId, accountName)}.jpg");
-            await File.WriteAllBytesAsync(avatarPath, bytes);
+            // 原子写：先写临时文件再整体替换，避免 UI 线程在覆盖期间读到半截 JPEG 或撞上写入中的文件，
+            // 那会让已显示的头像瞬时闪失（需重进/重登才回来）。
+            var tempPath = avatarPath + ".tmp";
+            await File.WriteAllBytesAsync(tempPath, bytes);
+            File.Move(tempPath, avatarPath, overwrite: true);
             return avatarPath;
         }
         catch (HttpRequestException)

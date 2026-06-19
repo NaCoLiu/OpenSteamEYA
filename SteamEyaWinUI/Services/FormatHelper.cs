@@ -76,7 +76,9 @@ internal static class FormatHelper
             return unknownText;
         }
 
-        if (seconds == 0)
+        // seconds > int.MaxValue 说明它本是“负的剩余秒数”被当无符号读出的天文数字（冷却其实已过期）。
+        // 兜底拦下，避免历史里早先存下的坏值仍显示成“49707天…”。
+        if (seconds == 0 || seconds > int.MaxValue)
         {
             return Loc.T("Format_Cooldown_None");
         }

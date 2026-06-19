@@ -29,7 +29,7 @@ internal sealed class SteamLicenseClient
     public static IReadOnlyList<SteamUpstreamServer> Servers { get; } = new List<SteamUpstreamServer>
     {
         new("奶味", "http://111.170.18.37:9099"),
-        new("伊万", "http://70.39.201.195:9099"),
+        new("伊万/小岛", "http://70.39.201.195:9099"),
         new("路飞", "http://38.76.193.80:9099")
     };
 

@@ -139,7 +139,7 @@
                                             Height="48"
                                             VerticalAlignment="Center"
                                             DisplayName="{x:Bind AccountTitle}"
-                                            ProfilePicture="{x:Bind AvatarImage}" />
+                                            ProfilePicture="{x:Bind AvatarImage, Mode=OneWay}" />
 
                                         <StackPanel
                                             Grid.Column="1"
