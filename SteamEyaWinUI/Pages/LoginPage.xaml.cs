@@ -208,7 +208,19 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
             {
                 ShowStatus(Loc.T("Login_Status_Personalized"), InfoBarSeverity.Success);
             }
-            else
+
+            // 只要有任一项应用成功就后台重抓资料，让历史页/信息面板跟上新昵称头像
+            //（steamcommunity 边缘缓存可能短暂返回旧值，后续登录/手动刷新会再兜底）。
+            if (result.NameApplied || result.AvatarApplied)
+            {
+                var steamId = AppState.JwtTokenService.Inspect(eyaToken).SteamId;
+                if (!string.IsNullOrWhiteSpace(steamId))
+                {
+                    StartBackgroundProfileRefresh(steamId);
+                }
+            }
+
+            if (!result.IsFullSuccess)
             {
                 var errors = new List<string>();
                 if (result.NameRequested && !result.NameApplied)
@@ -782,6 +794,33 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
         string.IsNullOrWhiteSpace(value) ? null : value;
 
     /// <summary>
+    /// 后台重新抓取单个账号的昵称/头像并落盘，有更新时回 UI 线程重载历史列表与右侧信息面板。
+    /// 失败只记日志（best-effort，绝不打扰主流程）。
+    /// </summary>
+    private void StartBackgroundProfileRefresh(string steamId)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var refreshed = await AppState.AccountHistoryService.RefreshProfilesAsync([steamId]);
+                if (refreshed > 0)
+                {
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        AppState.ReloadHistory();
+                        ApplyStoredAccountInfoProfile(steamId);
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warn($"后台刷新账号资料失败（{steamId}）：{ex.Message}");
+            }
+        });
+    }
+
+    /// <summary>
     /// 同步右侧账号信息面板的头像/昵称，并返回本次已知的资料供调用方预取（避免后续 SaveLoginAsync 再抓一遍）。
     /// 命中已完整的历史记录时返回该记录；否则返回网络抓取到的预览；都拿不到返回 null。
     /// </summary>
@@ -801,6 +840,9 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
                 (!string.IsNullOrWhiteSpace(storedAccount.AvatarPath) ||
                     !string.IsNullOrWhiteSpace(storedAccount.AvatarUrl)))
             {
+                // 命中完整记录立即返回供显示，但后台仍兜底重新抓取一次：
+                // 否则资料一旦落盘便永久冻结，账号在 Steam 侧改名/换头像后这里永远显示旧值。
+                StartBackgroundProfileRefresh(tokenInfo.SteamId);
                 return storedAccount;
             }
         }

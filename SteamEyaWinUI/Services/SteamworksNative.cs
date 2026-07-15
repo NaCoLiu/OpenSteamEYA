@@ -5,9 +5,13 @@ namespace SteamEyaWinUI.Services;
 /// <summary>
 /// Steamworks SDK 扁平 C API 的最小 P/Invoke 绑定（仅「强推 cfg 到 Steam 云」所需）。
 ///
+/// 重要：这些 API 只能在短命辅助进程（<see cref="Cs2CloudPushWorker"/>）里调用，绝不可在 GUI 主进程调用——
+/// Steam 把「以 730 身份 SteamAPI_Init 的进程」当作 CS2 游戏进程，直到该进程退出前商店/库都显示「正在运行」，
+/// 用户点「停止」时 Steam 还会强杀该进程（SteamAPI_Shutdown 只断开 API，不结束游戏会话）。
+///
 /// 运行前提（缺任一都会让 <see cref="SteamAPI_InitFlat"/> 返回非 0 或抛 DllNotFound）：
 ///   · 运行目录存在 <c>steam_api64.dll</c>（Steamworks SDK 再分发库，已随仓库入库并由构建拷入输出目录）；
-///   · 运行目录存在 <c>steam_appid.txt</c>（内容为 730，令本进程以 CS2 身份初始化，由 Cs2CloudService 自动写入）；
+///   · 运行目录存在 <c>steam_appid.txt</c>（内容为 730，令调用进程以 CS2 身份初始化，由 Cs2CloudPushWorker 自动写入）；
 ///   · Steam 正在运行且已登录，且当前登录账号拥有 CS2(730)。
 ///
 /// 绑定的接口版本为 STEAMREMOTESTORAGE_INTERFACE_VERSION016（对应 Steamworks SDK ~1.5x/1.6x）。

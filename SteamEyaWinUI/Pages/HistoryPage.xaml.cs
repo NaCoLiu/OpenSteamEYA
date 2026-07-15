@@ -254,10 +254,51 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
         }
     }
 
-    private void RefreshHistoryButton_Click(object sender, RoutedEventArgs e)
+    // 「刷新」按钮的网络资料同步是否进行中（防连点叠加多轮抓取；UI 线程独占访问，无需同步）。
+    private bool _profileRefreshInFlight;
+
+    private async void RefreshHistoryButton_Click(object sender, RoutedEventArgs e)
     {
+        // 先秒级重读磁盘保持原有手感；随后后台重新抓取全部账号的昵称/头像——
+        // 此前该按钮只重读磁盘，资料一旦落盘便再无任何入口更新，账号改名/换头像后界面永远停留旧值。
         AppState.ReloadHistory(GetSelectedSteamId());
-        AppState.ShowStatus(Loc.T("History_Status_Refreshed"), InfoBarSeverity.Success);
+
+        var steamIds = AppState.HistoryAccounts
+            .Select(item => item.SteamId)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToList();
+        if (_profileRefreshInFlight || steamIds.Count == 0)
+        {
+            AppState.ShowStatus(Loc.T("History_Status_Refreshed"), InfoBarSeverity.Success);
+            return;
+        }
+
+        _profileRefreshInFlight = true;
+        AppState.ShowStatus(Loc.T("History_Status_ProfileSyncing"), InfoBarSeverity.Informational);
+        try
+        {
+            var refreshed = await AppState.AccountHistoryService.RefreshProfilesAsync(steamIds);
+            if (refreshed > 0)
+            {
+                AppState.ReloadHistory(GetSelectedSteamId());
+                AppState.ShowStatus(
+                    Loc.Tf("History_Status_ProfileSyncDone_Format", refreshed), InfoBarSeverity.Success);
+            }
+            else
+            {
+                AppState.ShowStatus(Loc.T("History_Status_ProfileSyncNone"), InfoBarSeverity.Warning);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("历史账号资料刷新失败。", ex);
+            AppState.ShowStatus(
+                Loc.Tf("History_Status_ProfileSyncFail_Format", ex.Message), InfoBarSeverity.Warning);
+        }
+        finally
+        {
+            _profileRefreshInFlight = false;
+        }
     }
 
     private void HistoryAccountList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -359,7 +400,7 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
             AppState.SetBusy(false);
         }
 
-        // 后台补全昵称/头像，完成后刷新列表（不占用全局忙碌状态，失败不影响导入结果）。
+        // 后台补全昵称/头像，完成后刷新列表（不占用全局忙碌状态，失败不影响导入结果，但要让用户知道）。
         try
         {
             var refreshed = await AppState.AccountHistoryService.RefreshProfilesAsync(
@@ -369,9 +410,17 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
                 AppState.ReloadHistory(GetSelectedSteamId());
                 AppState.ShowStatus(Loc.Tf("History_Status_ProfileSyncDone_Format", refreshed), InfoBarSeverity.Success);
             }
+            else
+            {
+                // 全部抓取失败（断网/被限流等）：不能停留在「导入完成」上装作没事，给出可重试的提示。
+                AppState.ShowStatus(Loc.T("History_Status_ProfileSyncNone"), InfoBarSeverity.Warning);
+            }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            AppLog.Error("导入后补全账号资料失败。", ex);
+            AppState.ShowStatus(
+                Loc.Tf("History_Status_ProfileSyncFail_Format", ex.Message), InfoBarSeverity.Warning);
         }
     }
 

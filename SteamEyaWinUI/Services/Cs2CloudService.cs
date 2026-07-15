@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using SteamEyaWinUI.Localization;
@@ -26,18 +27,22 @@ internal sealed record Cs2CloudPushResult(
 ///      「当前登录账号」的 CS2 云端——由 Steam 负责下发落地，我们不手搓云逻辑。
 /// 注意：画面设置 cs2_video.txt 不在云端（属整机本地文件），云同步无法覆盖它。
 ///
+/// Steamworks 调用不在本进程执行：Steam 会把「以 730 身份 SteamAPI_Init 的进程」当作 CS2 游戏进程，
+/// 该进程不退出「正在运行」状态就不清除，点「停止」还会被 Steam 强杀。故 ForcePush 只负责把待推文件
+/// 落到临时目录，再拉起自身 exe 的短命辅助进程（<see cref="Cs2CloudPushWorker"/>）完成 init/写云/退出。
+///
 /// 前提：目标账号拥有 CS2、Steam 已登录、运行目录有 steam_api64.dll（见 SteamworksNative）。
 /// 全程 best-effort：任何失败只记日志/提示，绝不中断上号主流程。
 /// </summary>
 internal sealed class Cs2CloudService
 {
     private const string Cs2AppFolder = "730";
-    private const uint Cs2AppId = 730;
     // 个人账号 SteamID64 = 该基准 + 32 位 accountId（accountId 即 userdata 目录名）。
     private const ulong SteamId64Base = 76561197960265728UL;
 
-    // SteamAPI_Init/Shutdown 是进程级全局状态，跨本类所有实例串行化，避免并发 init 崩溃。
-    private static readonly object InitGate = new();
+    // 一次只跑一个推送辅助进程：登录后台推送与设置页「立即推送」并发时串行执行，
+    // 避免两个 730 身份的 Steamworks 会话同时写同名云文件、结果无法归因。
+    private static readonly object PushGate = new();
 
     /// <summary>枚举「已上云过 CS2 设置」的候选来源账号（remote 下有 cs2_user_*.vcfg），供设置页来源下拉。</summary>
     public IReadOnlyList<Cs2SettingsSource> EnumerateSources(string? userdataPath)
@@ -187,8 +192,9 @@ internal sealed class Cs2CloudService
     }
 
     /// <summary>
-    /// 用 Steamworks 云 API 把给定文件强推到「当前登录账号」的 CS2(730) 云端。
-    /// <paramref name="maxWaitSeconds"/> 内以 2s 间隔重试 SteamAPI_Init（等 Steam 登录就绪）。
+    /// 把给定文件强推到「当前登录账号」的 CS2(730) 云端：文件落到临时目录后交给短命辅助进程执行
+    /// （Steamworks init 必须在会立即退出的进程里做，否则 Steam 一直显示 CS2「正在运行」，见类注释）。
+    /// <paramref name="maxWaitSeconds"/> 内辅助进程以 2s 间隔重试 SteamAPI_Init（等 Steam 登录就绪）。
     /// <paramref name="expectedSteamId64"/> 非空时，写云前核对当前登录账号确为该 SteamID，
     /// 不符则视为「还没登到目标账号」继续等待，超时也绝不写到别的账号（防覆盖他人云端设置）。
     /// 「立即推送」传 null，语义即推给当前登录的任意账号。
@@ -201,155 +207,196 @@ internal sealed class Cs2CloudService
             return new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_NoSource"));
         }
 
-        ulong? expectedId = null;
-        if (!string.IsNullOrWhiteSpace(expectedSteamId64) && ulong.TryParse(expectedSteamId64.Trim(), out var parsed))
+        // 限时抢锁而非无限期排队：登录后台推送可能持锁几十秒（辅助进程要等 Steam 登录就绪），
+        // 「立即推送」若在此期间无限期阻塞会表现为分钟级无反馈假死。抢不到就明确告知用户稍后再试。
+        if (!Monitor.TryEnter(PushGate, TimeSpan.FromSeconds(maxWaitSeconds)))
         {
-            expectedId = parsed;
+            AppLog.Warn("另一次 CS2 云推送正在进行，本次放弃等待。");
+            return new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_PushBusy"));
         }
 
-        // 每次尝试只在锁内做一次 init+写入+shutdown（原子），Thread.Sleep 放锁外，
-        // 避免长时间独占进程级 InitGate 拖死并发的另一次推送/「立即推送」。
-        var attempts = Math.Max(1, maxWaitSeconds / 2);
-        var lastRetryResult = new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_InitFailed"));
-        for (var attempt = 0; attempt < attempts; attempt++)
+        try
         {
-            var (retry, result) = TryPushOnce(files, expectedId);
-            if (!retry)
-            {
-                return result;
-            }
-
-            lastRetryResult = result; // 保留最后一次重试原因（init 失败 / 账号不符），超时后据此告知用户。
-            if (attempt < attempts - 1)
-            {
-                Thread.Sleep(2000);
-            }
+            return RunPushHelper(files, maxWaitSeconds, expectedSteamId64);
         }
-
-        return lastRetryResult;
+        finally
+        {
+            Monitor.Exit(PushGate);
+        }
     }
 
-    // 单次尝试。返回 (retry, result)：retry=true 表示「值得等 Steam 登好/登到目标账号再试」
-    //（SteamAPI_Init 失败，或当前登录账号还不是目标账号）；
-    // 其余情况（DLL 缺失/接口拿不到/写入完成/异常）都 retry=false，直接以 result 返回，不再重试。
-    private static (bool Retry, Cs2CloudPushResult Result) TryPushOnce(
-        IReadOnlyList<Cs2CfgFile> files, ulong? expectedSteamId)
+    // 写 payload → 拉起自身 exe 的辅助进程 → 等其退出 → 解析 result.txt。临时目录 finally 里清理。
+    private static Cs2CloudPushResult RunPushHelper(
+        IReadOnlyList<Cs2CfgFile> files, int maxWaitSeconds, string? expectedSteamId64)
     {
-        lock (InitGate)
+        var exePath = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
         {
-            EnsureAppIdContext();
+            AppLog.Warn("拿不到当前进程 exe 路径，无法启动 CS2 云推送辅助进程。");
+            return new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_HelperLaunchFailed"));
+        }
 
-            var inited = false;
+        // GUI 在推送期间被关闭时（登录推送是后台 Task，finally 不保证执行），payload 目录会孤儿化，
+        // 这里顺手清扫历史残留。1 小时阈值远超辅助进程约 70s 的生命周期，不会误删另一实例的活目录。
+        SweepStalePayloadDirs();
+
+        var payloadDir = Path.Combine(Path.GetTempPath(), "SteamEYA", "cs2push-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(payloadDir);
+            foreach (var file in files)
+            {
+                // Name 来自来源目录枚举、理应是纯文件名；再过一遍 GetFileName 防路径拼接意外。
+                File.WriteAllBytes(Path.Combine(payloadDir, Path.GetFileName(file.Name)), file.Data);
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = exePath,
+                // steam_appid.txt 兜底按工作目录解析，故辅助进程工作目录固定为 exe 目录。
+                WorkingDirectory = AppContext.BaseDirectory,
+                UseShellExecute = false
+            };
+            startInfo.ArgumentList.Add(Cs2CloudPushWorker.CommandLineSwitch);
+            startInfo.ArgumentList.Add(payloadDir);
+            startInfo.ArgumentList.Add(maxWaitSeconds.ToString(CultureInfo.InvariantCulture));
+            startInfo.ArgumentList.Add(string.IsNullOrWhiteSpace(expectedSteamId64)
+                ? Cs2CloudPushWorker.NoExpectedSteamIdToken
+                : expectedSteamId64.Trim());
+
+            AppLog.Info($"启动 CS2 云推送辅助进程：{files.Count} 个文件，maxWait={maxWaitSeconds}s。");
+            using var helper = Process.Start(startInfo);
+            if (helper is null)
+            {
+                AppLog.Warn("Process.Start 返回 null，系统未创建 CS2 云推送辅助进程。");
+                return new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_HelperLaunchFailed"));
+            }
+
+            // 辅助进程自带 maxWaitSeconds 的重试等待，这里再给退出与写结果留余量。
+            if (!helper.WaitForExit((maxWaitSeconds + 30) * 1000))
+            {
+                AppLog.Warn("CS2 云推送辅助进程超时未退出，强制结束。");
+                TryKillHelper(helper);
+                return new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_HelperTimeout"));
+            }
+
+            return ReadHelperResult(Path.Combine(payloadDir, Cs2CloudPushWorker.ResultFileName));
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("调度 CS2 云推送辅助进程失败。", ex);
+            return new Cs2CloudPushResult(false, 0, ex.Message);
+        }
+        finally
+        {
             try
             {
-                var errMsg = new byte[1024]; // SteamErrMsg = char[k_cchMaxSteamErrMsg=1024]
-                var initResult = SteamworksNative.SteamAPI_InitFlat(errMsg);
-                inited = initResult == 0; // 0 = k_ESteamAPIInitResult_OK
-                if (!inited)
-                {
-                    AppLog.Warn($"SteamAPI_InitFlat 失败（result={initResult}）：{DecodeErrMsg(errMsg)}");
-                    return (true, new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_InitFailed")));
-                }
-
-                // 登录时推送：核对当前登录账号确为目标账号，不符则继续等（宁可超时放弃也不写错账号）。
-                if (expectedSteamId is { } expected && !IsLoggedInAs(expected))
-                {
-                    return (true, new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_WrongAccount")));
-                }
-
-                var remoteStorage = SteamworksNative.SteamAPI_SteamRemoteStorage_v016();
-                if (remoteStorage == IntPtr.Zero)
-                {
-                    return (false, new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_NoInterface")));
-                }
-
-                SteamworksNative.SteamAPI_ISteamRemoteStorage_SetCloudEnabledForApp(remoteStorage, true);
-
-                // 账号级云是用户在 Steam 设置里的总开关，SDK 无法代开；关着时 FileWrite 只写本地、不上云。
-                var accountCloudDisabled =
-                    !SteamworksNative.SteamAPI_ISteamRemoteStorage_IsCloudEnabledForAccount(remoteStorage);
-                if (accountCloudDisabled)
-                {
-                    AppLog.Warn("当前账号未开启账号级 Steam 云（Steam 设置→云同步），FileWrite 只写本地、不会上云。");
-                }
-
-                var pushed = 0;
-                foreach (var file in files)
-                {
-                    if (SteamworksNative.SteamAPI_ISteamRemoteStorage_FileWrite(
-                            remoteStorage, file.Name, file.Data, file.Data.Length))
-                    {
-                        pushed++;
-                    }
-                    else
-                    {
-                        AppLog.Warn($"CS2 云 FileWrite 失败：{file.Name}");
-                    }
-                }
-
-                AppLog.Info($"CS2 云强推：成功写入 {pushed}/{files.Count} 个文件（账号云禁用={accountCloudDisabled}）。");
-                if (pushed == 0)
-                {
-                    return (false, new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_WriteFailed")));
-                }
-
-                // 部分文件写入失败：仍算已推送但明确告知用户不完整（原实现只要 pushed>0 就报“全部成功”）。
-                var partialFailed = files.Count - pushed;
-                return (false, new Cs2CloudPushResult(true, pushed, null, accountCloudDisabled, partialFailed));
+                Directory.Delete(payloadDir, recursive: true);
             }
-            catch (DllNotFoundException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
             {
-                return (false, new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_DllMissing")));
-            }
-            catch (EntryPointNotFoundException)
-            {
-                return (false, new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_DllVersion")));
-            }
-            catch (Exception ex)
-            {
-                AppLog.Error("CS2 云强推异常。", ex);
-                return (false, new Cs2CloudPushResult(false, 0, ex.Message));
-            }
-            finally
-            {
-                if (inited)
-                {
-                    SteamworksNative.SteamAPI_Shutdown();
-                }
-
-                // 清理本次为初始化 CS2 身份设的进程级环境变量，避免其被后续 login 启动的 steam.exe 等子进程继承。
-                ClearAppIdContext();
+                AppLog.Warn($"清理 CS2 云推送临时目录失败：{payloadDir}，{ex.Message}");
             }
         }
     }
 
-    // 核对当前登录 Steam 账号的 SteamID64 是否等于期望目标。拿不到用户接口（DLL 版本不符等）时返回 true 放行，
-    // 保持“不因核对能力缺失而彻底失效”，此时退化为原“推给当前登录账号”的行为。
-    private static bool IsLoggedInAs(ulong expectedSteamId64)
+    // 删除 %TEMP%\SteamEYA 下创建时间超过 1 小时的 cs2push-* 残留目录。全程 best-effort。
+    private static void SweepStalePayloadDirs()
     {
         try
         {
-            var user = SteamworksNative.SteamAPI_SteamUser_v023();
-            if (user == IntPtr.Zero)
+            var root = Path.Combine(Path.GetTempPath(), "SteamEYA");
+            if (!Directory.Exists(root))
             {
-                AppLog.Warn("拿不到 ISteamUser 接口，跳过登录账号核对。");
-                return true;
+                return;
             }
 
-            var actual = SteamworksNative.SteamAPI_ISteamUser_GetSteamID(user);
-            if (actual == expectedSteamId64)
+            foreach (var dir in Directory.EnumerateDirectories(root, "cs2push-*"))
             {
-                return true;
+                try
+                {
+                    if (DateTime.UtcNow - Directory.GetCreationTimeUtc(dir) > TimeSpan.FromHours(1))
+                    {
+                        Directory.Delete(dir, recursive: true);
+                        AppLog.Info($"已清扫残留 CS2 推送临时目录：{dir}");
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    AppLog.Warn($"清扫残留 CS2 推送临时目录失败：{dir}，{ex.Message}");
+                }
             }
-
-            AppLog.Warn($"当前登录账号（{actual}）与目标账号（{expectedSteamId64}）不符，暂不写云、继续等待。");
-            return false;
         }
-        catch (EntryPointNotFoundException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            AppLog.Warn("steam_api64.dll 无 ISteamUser v023 导出，跳过登录账号核对。");
-            return true;
+            AppLog.Warn($"枚举 CS2 推送临时目录失败：{ex.Message}");
         }
+    }
+
+    private static void TryKillHelper(Process helper)
+    {
+        try
+        {
+            helper.Kill(entireProcessTree: true);
+            helper.WaitForExit(3000);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"结束 CS2 云推送辅助进程失败：{ex.Message}");
+        }
+    }
+
+    // 解析辅助进程写回的 key=value 结果文件；errorKey 在此翻译成本地化文案（辅助进程不做本地化）。
+    private static Cs2CloudPushResult ReadHelperResult(string resultPath)
+    {
+        string[] lines;
+        try
+        {
+            if (!File.Exists(resultPath))
+            {
+                AppLog.Warn("CS2 云推送辅助进程已退出但未留下结果文件（可能崩溃或被安全软件拦截）。");
+                return new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_HelperNoResult"));
+            }
+
+            lines = File.ReadAllLines(resultPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            AppLog.Warn($"读取 CS2 云推送结果文件失败：{ex.Message}");
+            return new Cs2CloudPushResult(false, 0, Loc.T("Cs2Cloud_Error_HelperNoResult"));
+        }
+
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.TrimStart('\uFEFF'); // 容错 BOM，避免首行键名带上不可见字符。
+            var separator = line.IndexOf('=');
+            if (separator > 0)
+            {
+                values[line[..separator]] = line[(separator + 1)..];
+            }
+        }
+
+        var ok = values.GetValueOrDefault("ok") == "1";
+        _ = int.TryParse(
+            values.GetValueOrDefault("pushed"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var pushed);
+        _ = int.TryParse(
+            values.GetValueOrDefault("partialFailed"), NumberStyles.Integer, CultureInfo.InvariantCulture,
+            out var partialFailed);
+        var accountCloudDisabled = values.GetValueOrDefault("accountCloudDisabled") == "1";
+
+        string? error = null;
+        if (!ok)
+        {
+            var errorKey = values.GetValueOrDefault("errorKey");
+            error = !string.IsNullOrWhiteSpace(errorKey)
+                ? Loc.T(errorKey)
+                : values.GetValueOrDefault("errorText") is { Length: > 0 } text
+                    ? text
+                    : Loc.T("Cs2Cloud_Error_HelperNoResult");
+        }
+
+        return new Cs2CloudPushResult(ok, pushed, error, accountCloudDisabled, partialFailed);
     }
 
     // 账号的 CS2 云文件本地镜像目录：userdata/<accountId>/730/remote（文件名即云端名）。
@@ -381,59 +428,4 @@ internal sealed class Cs2CloudService
         return accountId != 0;
     }
 
-    // 从 SteamErrMsg（char[1024]，ASCII、null 结尾）解出错误文字，用于日志诊断。
-    private static string DecodeErrMsg(byte[] buffer)
-    {
-        var length = Array.IndexOf(buffer, (byte)0);
-        if (length < 0)
-        {
-            length = buffer.Length;
-        }
-
-        return length == 0 ? string.Empty : System.Text.Encoding.ASCII.GetString(buffer, 0, length);
-    }
-
-    // 让本进程以 CS2 身份初始化 Steamworks：设置 SteamAppId 环境变量（SDK 优先读它，最可靠），
-    // 并在 exe 目录写一份 steam_appid.txt 兜底（部分 SDK 版本按工作目录读该文件）。
-    private static void EnsureAppIdContext()
-    {
-        var appId = Cs2AppId.ToString(CultureInfo.InvariantCulture);
-        try
-        {
-            Environment.SetEnvironmentVariable("SteamAppId", appId);
-            Environment.SetEnvironmentVariable("SteamGameId", appId);
-        }
-        catch (Exception ex)
-        {
-            AppLog.Warn($"设置 SteamAppId 环境变量失败：{ex.Message}");
-        }
-
-        try
-        {
-            var path = Path.Combine(AppContext.BaseDirectory, "steam_appid.txt");
-            if (!File.Exists(path))
-            {
-                File.WriteAllText(path, appId);
-            }
-        }
-        catch (Exception ex)
-        {
-            AppLog.Warn($"写 steam_appid.txt 失败：{ex.Message}");
-        }
-    }
-
-    // 清掉进程级 SteamAppId/SteamGameId，避免后续 login 启动的 steam.exe 及其子进程继承到 730 身份。
-    // steam_appid.txt 保留不动（只在本进程 exe 目录，下次推送 EnsureAppIdContext 会照常复用）。
-    private static void ClearAppIdContext()
-    {
-        try
-        {
-            Environment.SetEnvironmentVariable("SteamAppId", null);
-            Environment.SetEnvironmentVariable("SteamGameId", null);
-        }
-        catch (Exception ex)
-        {
-            AppLog.Warn($"清理 SteamAppId 环境变量失败：{ex.Message}");
-        }
-    }
 }
