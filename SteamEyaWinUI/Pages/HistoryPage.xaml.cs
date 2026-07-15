@@ -206,7 +206,9 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
             ? null
             : _viewItems.FirstOrDefault(account =>
                 string.Equals(AccountHistoryService.GetAccountKey(account), activeKey, StringComparison.OrdinalIgnoreCase));
-        HistoryAccountList.SelectedItem = active ?? _viewItems.FirstOrDefault();
+        // 没有选中意图（或原选中项已被过滤/删除）时保持未选中：不兜底选第一项，
+        // 否则用户未点任何账号，详情面板就顶着第一个账号的头像与资料。
+        HistoryAccountList.SelectedItem = active;
 
         HistoryEmptyPanel.Visibility = _viewItems.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         UpdateSummaryTexts();
@@ -1072,7 +1074,8 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
         if (HistoryAccountList.SelectedItem is not SteamAccountHistoryItem account)
         {
             HistoryDetailAvatar.ProfilePicture = null;
-            HistoryDetailAvatar.DisplayName = Loc.T("History_Detail_Unselected");
+            // 空串才显示默认人像剪影：PersonPicture 按 DisplayName 取首字母，英文文案会显示„NS“之类的字母块。
+            HistoryDetailAvatar.DisplayName = string.Empty;
             HistoryDetailAccountNameText.Text = Loc.T("History_Detail_NoAccountSelected");
             HistoryDetailPersonaText.Text = Loc.T("History_Detail_ProfileNotSynced");
             HistoryDetailSteamIdText.Text = Loc.T("History_Detail_Unparsed");

@@ -105,7 +105,9 @@ public sealed partial class CachedAccountsPage : Page, INotifyPropertyChanged
             ? null
             : _viewItems.FirstOrDefault(account =>
                 string.Equals(account.CacheKey, activeKey, StringComparison.OrdinalIgnoreCase));
-        CachedAccountList.SelectedItem = active ?? _viewItems.FirstOrDefault();
+        // 没有选中意图（或原选中项已被过滤/删除）时保持未选中：不兜底选第一项，
+        // 否则用户未点任何账号，详情面板就顶着第一个账号的头像与资料。
+        CachedAccountList.SelectedItem = active;
 
         var hasAny = source.Count > 0;
         CachedEmptyPanel.Visibility = _viewItems.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -426,7 +428,8 @@ public sealed partial class CachedAccountsPage : Page, INotifyPropertyChanged
         if (CachedAccountList.SelectedItem is not CachedSteamLoginAccount account)
         {
             CachedDetailAvatar.ProfilePicture = null;
-            CachedDetailAvatar.DisplayName = Loc.T("Cached_Detail_Avatar_None");
+            // 空串才显示默认人像剪影：PersonPicture 按 DisplayName 取首字母，英文文案会显示字母块而非剪影。
+            CachedDetailAvatar.DisplayName = string.Empty;
             CachedDetailAccountNameText.Text = Loc.T("Cached_Detail_NoSelection");
             CachedDetailPersonaText.Text = Loc.T("Cached_Detail_PersonaUnsynced");
             CachedDetailSteamIdText.Text = Loc.T("Cached_Detail_SteamIdMissing");

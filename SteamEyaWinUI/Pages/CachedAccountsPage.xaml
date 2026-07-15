@@ -280,11 +280,12 @@
             <Border Grid.Column="1" Style="{StaticResource CardBorderStyle}" VerticalAlignment="Top">
                 <StackPanel Spacing="16">
                     <StackPanel Spacing="8" HorizontalAlignment="Center">
+                        <!-- 不绑 DisplayName：留空才显示默认人像剪影（PersonPicture 会按文案取首字母），
+                             且语言切换重估绑定会把代码里清空的值盖回去。 -->
                         <PersonPicture
                             x:Name="CachedDetailAvatar"
                             Width="92"
-                            Height="92"
-                            DisplayName="{x:Bind Strings.Get('Cached_Detail_Avatar_None'), Mode=OneWay}" />
+                            Height="92" />
                         <TextBlock
                             Text="{x:Bind Strings.Get('Cached_Detail_Title'), Mode=OneWay}"
                             HorizontalAlignment="Center"
