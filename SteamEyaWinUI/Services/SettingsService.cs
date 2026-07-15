@@ -42,6 +42,8 @@ internal sealed class SettingsService
                     var settings = JsonSerializer.Deserialize(json, AppSettingsJsonContext.Default.AppSettings);
                     if (settings is not null)
                     {
+                        // JSON 里显式的 "groups": null 会覆盖属性初始值，消费方（LoadGroups 等）直接 .Groups 会 NRE。
+                        settings.Groups ??= [];
                         return settings;
                     }
                 }
@@ -104,10 +106,20 @@ internal sealed class AppSettings
 
     /// <summary>「个性化」面板里设置的昵称，供登录页一键把账号资料设为该值。null/空表示不改昵称。</summary>
     public string? PersonaName { get; set; }
+
+    /// <summary>用户自定义账号分组定义（名称/排序）。成员关系存于各账号的 GroupIds，此处只存定义。</summary>
+    public List<AccountGroup> Groups { get; set; } = [];
+
+    /// <summary>是否在登录时把「来源账号」的 CS2 本地设置复制到要登录的账号。</summary>
+    public bool Cs2SyncOnLogin { get; set; }
+
+    /// <summary>CS2 设置同步的「来源账号」SteamID64；空表示未选择。详见 <see cref="Cs2CloudService"/>。</summary>
+    public string? Cs2SyncSourceSteamId { get; set; }
 }
 
 // 与账号历史一致用 source generator：JsonSerializerDefaults.Web（camelCase、大小写不敏感），AOT 下可读写。
 [JsonSourceGenerationOptions(JsonSerializerDefaults.Web, WriteIndented = true)]
 [JsonSerializable(typeof(AppSettings))]
 [JsonSerializable(typeof(CsLoadoutPreset))]
+[JsonSerializable(typeof(AccountGroup))]
 internal sealed partial class AppSettingsJsonContext : JsonSerializerContext;

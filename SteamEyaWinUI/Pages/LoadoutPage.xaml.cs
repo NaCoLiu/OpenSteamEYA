@@ -73,6 +73,7 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
         public Border Root = null!;
         public Image Image = null!;
         public TextBlock Empty = null!;
+        public TextBlock Name = null!;
         public Rectangle Line = null!;
         public uint Slot;
         public CsLoadoutGroup Group;
@@ -109,6 +110,8 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
                 Text = title,
                 FontSize = 15,
                 FontWeight = FontWeights.SemiBold,
+                // 装备区在固定深色面板上，标题用固定浅色而非主题色。
+                Foreground = Brush(0xFF, 0xE6, 0xEA, 0xF0),
                 Margin = new Thickness(0, row == 0 ? 0 : 6, 0, 4)
             };
             Grid.SetRow(header, row);
@@ -149,6 +152,17 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center
         };
+        // 已装备武器名（左下角小字）：只有剪影认不出型号，尤其同类枪型。
+        var name = new TextBlock
+        {
+            FontSize = 11,
+            Foreground = Brush(0xFF, 0xC9, 0xD1, 0xDC),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(10, 0, 10, 8),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Visibility = Visibility.Collapsed
+        };
         var line = new Rectangle
         {
             Height = 2,
@@ -162,6 +176,7 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
         content.Children.Add(bg);
         content.Children.Add(image);
         content.Children.Add(empty);
+        content.Children.Add(name);
         content.Children.Add(line);
 
         var root = new Border
@@ -172,7 +187,7 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
             CanDrag = true
         };
 
-        var cell = new CellView { Root = root, Image = image, Empty = empty, Line = line, Slot = slot, Group = group };
+        var cell = new CellView { Root = root, Image = image, Empty = empty, Name = name, Line = line, Slot = slot, Group = group };
         root.Tag = cell;
         root.DragStarting += Cell_DragStarting;
         root.DragOver += Cell_DragOver;
@@ -199,6 +214,8 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
             cell.Image.Source = new SvgImageSource(new Uri(weapon.IconUri));
             cell.Image.Visibility = Visibility.Visible;
             cell.Empty.Visibility = Visibility.Collapsed;
+            cell.Name.Text = weapon.LocalizedName;
+            cell.Name.Visibility = Visibility.Visible;
             cell.Line.Visibility = Visibility.Visible;
         }
         else
@@ -206,6 +223,7 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
             cell.Image.Source = null;
             cell.Image.Visibility = Visibility.Collapsed;
             cell.Empty.Visibility = Visibility.Visible;
+            cell.Name.Visibility = Visibility.Collapsed;
             cell.Line.Visibility = Visibility.Collapsed;
         }
     }

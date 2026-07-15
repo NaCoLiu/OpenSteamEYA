@@ -11,6 +11,10 @@ internal sealed class SteamLoginService
     private readonly SteamProcessService _steamProcessService = new();
     private readonly SteamLoginCacheService _loginCacheService = new();
     private readonly AccountHistoryService _accountHistoryService = new();
+    // 复用全局单例而非新建实例：SettingsService 用实例级锁串行化 settings.json 读写，
+    // 登录在后台线程读设置，若与设置页保存各持一把独立锁就会与写入竞争（读到默认值→CS2 同步被静默跳过）。
+    private readonly SettingsService _settingsService = AppState.SettingsService;
+    private readonly Cs2CloudService _cs2CloudService = AppState.Cs2CloudService;
 
     public LoginResult Login(string accountName, string eyaToken, IProgress<string>? progress = null)
     {
@@ -51,6 +55,8 @@ internal sealed class SteamLoginService
             progress?.Report(Loc.T("Steam_Progress_StartingSteam"));
             _steamProcessService.LaunchSteamWithLogin(paths, accountName);
 
+            TryPushCs2Cloud(paths, token.SteamId, progress);
+
             AppLog.Info("==== 上号流程完成（已请求启动 Steam）====");
             return new LoginResult(accountName, token.SteamId, token.ExpiresAt);
         }
@@ -87,6 +93,8 @@ internal sealed class SteamLoginService
             progress?.Report(Loc.T("Steam_Progress_StartingSteam"));
             _steamProcessService.LaunchSteamWithLogin(paths, account.AccountName);
 
+            TryPushCs2Cloud(paths, account.SteamId, progress);
+
             AppLog.Info($"==== 已请求恢复缓存账号：{account.AccountName} ({account.SteamId}) ====");
             return account;
         }
@@ -110,6 +118,27 @@ internal sealed class SteamLoginService
     public Task<int> RefreshCachedLoginProfilesAsync(IReadOnlyCollection<CachedSteamLoginAccount> accounts)
     {
         return _loginCacheService.RefreshProfilesAsync(accounts);
+    }
+
+    // 若开启「登录时同步 CS2 设置」，登录后把来源账号的 CS2 配置强推到目标账号的 Steam 云。
+    // Steam 刚启动尚未登好，ForcePush 内部会重试等待；放后台执行，不阻塞上号返回，失败只记日志。
+    private void TryPushCs2Cloud(SteamPaths paths, string targetSteamId, IProgress<string>? progress)
+    {
+        try
+        {
+            var settings = _settingsService.Load();
+            if (!settings.Cs2SyncOnLogin || string.IsNullOrWhiteSpace(settings.Cs2SyncSourceSteamId))
+            {
+                return;
+            }
+
+            var source = settings.Cs2SyncSourceSteamId;
+            _ = Task.Run(() => _cs2CloudService.PushSourceForLogin(paths, source, targetSteamId, progress));
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"CS2 云推送调度失败，忽略：{ex.Message}");
+        }
     }
 
     private void CacheLoginAccounts(

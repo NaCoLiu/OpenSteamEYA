@@ -280,6 +280,119 @@ internal sealed class AccountHistoryService
         }
     }
 
+    /// <summary>设置账号备注（trim；空白视为清空）。就地改写磁盘条目，其余字段保持不变。</summary>
+    public void SetNote(SteamAccountHistoryItem account, string? note)
+    {
+        var normalized = string.IsNullOrWhiteSpace(note) ? null : note.Trim();
+
+        _fileGate.Wait();
+        try
+        {
+            var document = ReadDocumentForWrite();
+            var item = FindExisting(document.Accounts, account.SteamId, account.AccountName);
+            if (item is null)
+            {
+                return;
+            }
+
+            item.Note = normalized;
+            document.Accounts = NormalizeAccounts(document.Accounts).ToList();
+            WriteDocument(document);
+        }
+        finally
+        {
+            _fileGate.Release();
+        }
+    }
+
+    /// <summary>批量把选中账号加入/移出某分组，返回实际改动的账号数。</summary>
+    public int SetGroupMembership(
+        IReadOnlyCollection<SteamAccountHistoryItem> accounts, string groupId, bool isMember)
+    {
+        if (accounts.Count == 0 || string.IsNullOrWhiteSpace(groupId))
+        {
+            return 0;
+        }
+
+        var keys = accounts.Select(GetAccountKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var changed = 0;
+
+        _fileGate.Wait();
+        try
+        {
+            var document = ReadDocumentForWrite();
+            foreach (var item in document.Accounts)
+            {
+                if (!keys.Contains(GetAccountKey(item)))
+                {
+                    continue;
+                }
+
+                item.GroupIds ??= [];
+                if (isMember)
+                {
+                    if (!item.GroupIds.Contains(groupId))
+                    {
+                        item.GroupIds.Add(groupId);
+                        changed++;
+                    }
+                }
+                else if (item.GroupIds.Remove(groupId))
+                {
+                    changed++;
+                }
+            }
+
+            if (changed > 0)
+            {
+                document.Accounts = NormalizeAccounts(document.Accounts).ToList();
+                WriteDocument(document);
+            }
+
+            return changed;
+        }
+        finally
+        {
+            _fileGate.Release();
+        }
+    }
+
+    /// <summary>删除分组时把该分组 ID 从所有账号移除（级联清理），返回受影响账号数。</summary>
+    public int RemoveGroupFromAllAccounts(string groupId)
+    {
+        if (string.IsNullOrWhiteSpace(groupId))
+        {
+            return 0;
+        }
+
+        var changed = 0;
+
+        _fileGate.Wait();
+        try
+        {
+            var document = ReadDocumentForWrite();
+            foreach (var item in document.Accounts)
+            {
+                if (item.GroupIds is { Count: > 0 } && item.GroupIds.Remove(groupId))
+                {
+                    changed++;
+                }
+            }
+
+            if (changed > 0)
+            {
+                document.Accounts = NormalizeAccounts(document.Accounts).ToList();
+                WriteDocument(document);
+            }
+
+            return changed;
+        }
+        finally
+        {
+            _fileGate.Release();
+        }
+    }
+
     /// <summary>合并导入账号（按 SteamID/账户名去重覆盖），导入不更新“上次登录”。</summary>
     public (int Added, int Updated) ImportAccounts(IReadOnlyList<AccountImportEntry> entries)
     {
@@ -561,7 +674,7 @@ internal sealed class AccountHistoryService
     private static IReadOnlyList<SteamAccountHistoryItem> NormalizeAccounts(
         IEnumerable<SteamAccountHistoryItem> accounts)
     {
-        return accounts
+        var normalized = accounts
             .Where(account =>
                 !string.IsNullOrWhiteSpace(account.AccountName) &&
                 !string.IsNullOrWhiteSpace(account.EyaToken))
@@ -571,6 +684,14 @@ internal sealed class AccountHistoryService
                 .First())
             .OrderByDescending(account => account.LastLoginAt)
             .ToList();
+
+        // JSON 里显式的 "groupIds": null 会覆盖属性初始值；消费方（如批量分组 flyout）直接 .GroupIds.Contains 会 NRE。
+        foreach (var account in normalized)
+        {
+            account.GroupIds ??= [];
+        }
+
+        return normalized;
     }
 
     /// <summary>账号去重键（SteamID 优先，缺失退化为账户名），供 HistoryPage 复用以保持选中态键一致。</summary>

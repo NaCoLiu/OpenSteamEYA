@@ -108,6 +108,73 @@
                 </StackPanel>
             </Border>
 
+            <!-- CS2 设置同步（issue #10）：登录时把来源账号的准星/灵敏度/键位等强推到目标账号的 Steam 云 -->
+            <Border Style="{StaticResource CardBorderStyle}">
+                <StackPanel Spacing="10">
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock
+                                Text="{x:Bind Strings.Get('Settings_Cs2Sync_Section'), Mode=OneWay}"
+                                Style="{StaticResource SectionTitleTextStyle}" />
+                            <TextBlock
+                                Text="{x:Bind Strings.Get('Settings_Cs2Sync_Desc'), Mode=OneWay}"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch
+                            x:Name="Cs2SyncToggle"
+                            Grid.Column="1"
+                            VerticalAlignment="Center"
+                            Toggled="Cs2SyncToggle_Toggled" />
+                    </Grid>
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            Grid.Column="0"
+                            VerticalAlignment="Center"
+                            Text="{x:Bind Strings.Get('Settings_Cs2Sync_Source'), Mode=OneWay}"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <ComboBox
+                            x:Name="Cs2SyncSourceCombo"
+                            Grid.Column="1"
+                            HorizontalAlignment="Stretch"
+                            SelectionChanged="Cs2SyncSourceCombo_SelectionChanged"
+                            PlaceholderText="{x:Bind Strings.Get('Settings_Cs2Sync_Source_Placeholder'), Mode=OneWay}" />
+                        <Button
+                            x:Name="Cs2SyncRefreshButton"
+                            Grid.Column="2"
+                            Click="Cs2SyncRefreshButton_Click"
+                            ToolTipService.ToolTip="{x:Bind Strings.Get('Common_Refresh'), Mode=OneWay}">
+                            <FontIcon Glyph="&#xE72C;" FontSize="14" />
+                        </Button>
+                        <Button
+                            x:Name="Cs2SyncPushNowButton"
+                            Grid.Column="3"
+                            Click="Cs2SyncPushNowButton_Click"
+                            ToolTipService.ToolTip="{x:Bind Strings.Get('Settings_Cs2Sync_PushNow_Tooltip'), Mode=OneWay}">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE898;" FontSize="14" />
+                                <TextBlock Text="{x:Bind Strings.Get('Settings_Cs2Sync_PushNow'), Mode=OneWay}" />
+                            </StackPanel>
+                        </Button>
+                    </Grid>
+                    <TextBlock
+                        Text="{x:Bind Strings.Get('Settings_Cs2Sync_Note'), Mode=OneWay}"
+                        Style="{StaticResource CaptionTextBlockStyle}"
+                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                        TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
             <!-- 数据 -->
             <Border Style="{StaticResource CardBorderStyle}">
                 <StackPanel Spacing="10">

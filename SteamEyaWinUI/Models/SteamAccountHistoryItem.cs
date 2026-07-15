@@ -85,6 +85,27 @@ public sealed partial class SteamAccountHistoryItem : INotifyPropertyChanged
 
     public DateTimeOffset? CsStatusUpdatedAt { get; set; }
 
+    private string? _note;
+
+    /// <summary>用户备注（可为空）。跟随账号持久化，可在详情面板编辑，并计入搜索。</summary>
+    public string? Note
+    {
+        get => _note;
+        set
+        {
+            if (_note == value)
+            {
+                return;
+            }
+
+            _note = value;
+            RaiseNoteVisuals();
+        }
+    }
+
+    /// <summary>所属分组的稳定 ID 列表（分组定义存于设置，改名不影响此处）。始终非 null。</summary>
+    public List<string> GroupIds { get; set; } = [];
+
     [JsonIgnore]
     public string AccountTitle => string.IsNullOrWhiteSpace(AccountName) ? Loc.T("Account_Title_Unnamed") : AccountName;
 
@@ -141,6 +162,60 @@ public sealed partial class SteamAccountHistoryItem : INotifyPropertyChanged
     [JsonIgnore]
     public string CooldownStatusText =>
         FormatHelper.FormatCooldownStatusText(CooldownSeconds, CooldownReason, GcVacBannedAsInt, Loc.T("Account_Pending"), Loc.T("Account_Pending"));
+
+    // ---------- 冷却倒计时（快照剩余秒 − 已流逝时间，实时递减；由页面每秒计时器驱动刷新绑定） ----------
+
+    /// <summary>冷却锚点：查询写入冷却快照的时刻，用于扣除已流逝时间。</summary>
+    private DateTimeOffset? CooldownAnchor => CsStatusUpdatedAt ?? PremierScoreUpdatedAt;
+
+    /// <summary>
+    /// 实时剩余冷却秒数。语义与 <see cref="CooldownSeconds"/> 一致：null=未知（GC 未答）/ 0=无冷却 / 正=剩余秒。
+    /// 仅当快照为 (0, int.MaxValue] 且有锚点时才扣除流逝；否则原样透传，交由格式化按未知/无冷却判定。
+    /// </summary>
+    [JsonIgnore]
+    public uint? RemainingCooldownSeconds
+    {
+        get
+        {
+            var snapshot = CooldownSeconds;
+            if (snapshot is null or 0 || snapshot > int.MaxValue)
+            {
+                return snapshot;
+            }
+
+            var anchor = CooldownAnchor;
+            if (anchor is null)
+            {
+                return snapshot;
+            }
+
+            var remaining = snapshot.Value - (DateTimeOffset.Now - anchor.Value).TotalSeconds;
+            return remaining <= 0 ? 0u : (uint)remaining;
+        }
+    }
+
+    /// <summary>是否仍在倒计时（页面据此决定是否继续每秒刷新该卡片，全部到期后即可停表）。</summary>
+    [JsonIgnore]
+    public bool HasLiveCooldown => CooldownAnchor is not null && RemainingCooldownSeconds is > 0 and <= int.MaxValue;
+
+    [JsonIgnore]
+    public string RemainingCooldownText =>
+        FormatHelper.FormatCooldownCountdownText(RemainingCooldownSeconds, CooldownReason, Loc.T("Account_Pending"));
+
+    [JsonIgnore]
+    public string RemainingCooldownSummaryText => Loc.Tf("Account_Cooldown_Summary_Format", RemainingCooldownText);
+
+    [JsonIgnore]
+    public string RemainingCooldownStatusText => Loc.Tf(
+        "Format_CooldownStatus_Format",
+        RemainingCooldownText,
+        FormatHelper.FormatGcVacText(GcVacBannedAsInt, Loc.T("Account_Pending")));
+
+    [JsonIgnore]
+    public bool HasNote => !string.IsNullOrWhiteSpace(Note);
+
+    [JsonIgnore]
+    public Visibility NoteIndicatorVisibility => HasNote ? Visibility.Visible : Visibility.Collapsed;
 
     [JsonIgnore]
     public string CsPlayerLevelText => FormatHelper.FormatPlayerLevelText(CsPlayerLevel, Loc.T("Account_Pending"));
@@ -333,5 +408,32 @@ public sealed partial class SteamAccountHistoryItem : INotifyPropertyChanged
         handler(this, new PropertyChangedEventArgs(nameof(SelectionRingVisibility)));
         handler(this, new PropertyChangedEventArgs(nameof(CheckIndicatorVisibility)));
         handler(this, new PropertyChangedEventArgs(nameof(EmptyCheckCircleVisibility)));
+    }
+
+    /// <summary>由页面每秒计时器调用：通知倒计时相关绑定重取，实现卡片/详情实时递减。</summary>
+    public void NotifyCooldownTick()
+    {
+        var handler = PropertyChanged;
+        if (handler is null)
+        {
+            return;
+        }
+
+        handler(this, new PropertyChangedEventArgs(nameof(RemainingCooldownText)));
+        handler(this, new PropertyChangedEventArgs(nameof(RemainingCooldownSummaryText)));
+        handler(this, new PropertyChangedEventArgs(nameof(RemainingCooldownStatusText)));
+    }
+
+    private void RaiseNoteVisuals()
+    {
+        var handler = PropertyChanged;
+        if (handler is null)
+        {
+            return;
+        }
+
+        handler(this, new PropertyChangedEventArgs(nameof(Note)));
+        handler(this, new PropertyChangedEventArgs(nameof(HasNote)));
+        handler(this, new PropertyChangedEventArgs(nameof(NoteIndicatorVisibility)));
     }
 }

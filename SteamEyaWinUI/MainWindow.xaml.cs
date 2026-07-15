@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -23,6 +24,10 @@ public sealed partial class MainWindow : Window
 
     private static nint s_hwnd;
 
+    // Informational/Success 状态若干秒后自动收起；Warning/Error 常驻，直到被替换或用户手动关闭。
+    private static readonly TimeSpan StatusAutoDismissDelay = TimeSpan.FromSeconds(6);
+    private readonly DispatcherQueueTimer _statusDismissTimer;
+
     public static MainWindow? Instance { get; private set; }
 
     /// <summary>主窗口句柄，供文件/目录选择器等 WinRT 互操作（InitializeWithWindow）使用；在 ConfigureWindowSize 中赋值。</summary>
@@ -41,11 +46,17 @@ public sealed partial class MainWindow : Window
 
         ApplyTheme(ParseTheme(AppState.SettingsService.Load().Theme));
         RefreshNavText();
-        StatusInfoBar.Message = Loc.T("Common_Ready");
         Loc.LanguageChanged += RefreshNavText;
+
+        _statusDismissTimer = DispatcherQueue.CreateTimer();
+        _statusDismissTimer.Interval = StatusAutoDismissDelay;
+        _statusDismissTimer.IsRepeating = false;
+        _statusDismissTimer.Tick += (_, _) => StatusInfoBar.IsOpen = false;
 
         AppState.StatusReporter = ShowStatus;
         AppState.BusyChanged += OnBusyChanged;
+        AppState.UpdateStateChanged += RefreshUpdateBadge;
+        RefreshUpdateBadge();
 
         ConfigureWindowSize();
 
@@ -76,8 +87,36 @@ public sealed partial class MainWindow : Window
 
     public void ShowStatus(string message, InfoBarSeverity severity)
     {
+        // 状态可能来自后台线程（如登录后的 CS2 云推送进度），统一封送到 UI 线程。
+        if (!DispatcherQueue.HasThreadAccess)
+        {
+            DispatcherQueue.TryEnqueue(() => ShowStatus(message, severity));
+            return;
+        }
+
         StatusInfoBar.Message = message;
         StatusInfoBar.Severity = severity;
+        StatusInfoBar.IsOpen = true;
+
+        _statusDismissTimer.Stop();
+        if (severity is InfoBarSeverity.Informational or InfoBarSeverity.Success)
+        {
+            _statusDismissTimer.Start();
+        }
+    }
+
+    /// <summary>有新版本时在「关于」导航项上亮红点，代替曾经常驻底部的更新横幅。</summary>
+    private void RefreshUpdateBadge()
+    {
+        if (!DispatcherQueue.HasThreadAccess)
+        {
+            DispatcherQueue.TryEnqueue(RefreshUpdateBadge);
+            return;
+        }
+
+        AboutNavItem.InfoBadge = AppState.LatestUpdate?.IsUpdateAvailable == true
+            ? new InfoBadge()
+            : null;
     }
 
     /// <summary>历史页“载入到登录页”：切到登录页并填充账号。</summary>

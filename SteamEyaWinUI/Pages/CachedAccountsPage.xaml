@@ -60,14 +60,15 @@
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
+                <!-- 破坏性操作：红色标识与普通按钮区分。 -->
                 <Button
                     x:Name="ClearCachedButton"
                     HorizontalAlignment="Left"
                     Click="ClearCachedButton_Click"
                     ToolTipService.ToolTip="{x:Bind Strings.Get('Cached_Clear_Tooltip'), Mode=OneWay}">
                     <StackPanel Orientation="Horizontal" Spacing="8">
-                        <FontIcon Glyph="&#xE75C;" FontSize="16" />
-                        <TextBlock Text="{x:Bind Strings.Get('Common_Clear'), Mode=OneWay}" />
+                        <FontIcon Glyph="&#xE74D;" FontSize="16" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                        <TextBlock Text="{x:Bind Strings.Get('Common_Clear'), Mode=OneWay}" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
                     </StackPanel>
                 </Button>
 

@@ -42,38 +42,48 @@
             <SelectorBarItem x:Name="TeamCtItem" Text="{x:Bind Strings.Get('Loadout_Team_Ct'), Mode=OneWay}" />
         </SelectorBar>
 
-        <Grid Grid.Row="2" RowSpacing="10">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="*" />
-                <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
+        <!-- 深色「装备面板」：武器格子沿用 CS2 深色风格，包进统一深色板中，
+             浅色主题下不再是孤立的深色块；格子/池内配色固定，与主题无关。 -->
+        <Border
+            Grid.Row="2"
+            CornerRadius="8"
+            Padding="16"
+            Background="#FF1B2331"
+            BorderThickness="1"
+            BorderBrush="#FF32405A">
+            <Grid RowSpacing="10">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
 
-            <!-- 装备区：三列等高，格子按星形行拉伸填满 → 各列最后一行底部对齐（复刻 CS2）。代码里填充格子。 -->
-            <Grid Grid.Row="0" x:Name="EquippedGrid" ColumnSpacing="14">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <Grid x:Name="Col0Host" Grid.Column="0" VerticalAlignment="Stretch" />
-                <Grid x:Name="Col1Host" Grid.Column="1" VerticalAlignment="Stretch" />
-                <Grid x:Name="Col2Host" Grid.Column="2" VerticalAlignment="Stretch" />
+                <!-- 装备区：三列等高，格子按星形行拉伸填满 → 各列最后一行底部对齐（复刻 CS2）。代码里填充格子。 -->
+                <Grid Grid.Row="0" x:Name="EquippedGrid" ColumnSpacing="14">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Grid x:Name="Col0Host" Grid.Column="0" VerticalAlignment="Stretch" />
+                    <Grid x:Name="Col1Host" Grid.Column="1" VerticalAlignment="Stretch" />
+                    <Grid x:Name="Col2Host" Grid.Column="2" VerticalAlignment="Stretch" />
+                </Grid>
+
+                <!-- 可选武器池（未装备的，按阵营）。 -->
+                <StackPanel Grid.Row="1" Spacing="6">
+                    <TextBlock Text="{x:Bind Strings.Get('Loadout_PoolHint'), Mode=OneWay}" FontSize="12" Foreground="#FFAAB4C4" />
+                    <GridView
+                        x:Name="PoolGrid"
+                        MaxHeight="160"
+                        SelectionMode="None"
+                        IsItemClickEnabled="False"
+                        CanDragItems="True"
+                        CanReorderItems="False"
+                        AllowDrop="False"
+                        DragItemsStarting="PoolGrid_DragItemsStarting"
+                        ItemTemplate="{StaticResource PoolTileTemplate}" />
+                </StackPanel>
             </Grid>
-
-            <!-- 可选武器池（未装备的，按阵营）。 -->
-            <StackPanel Grid.Row="1" Spacing="6">
-                <TextBlock Text="{x:Bind Strings.Get('Loadout_PoolHint'), Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                <GridView
-                    x:Name="PoolGrid"
-                    MaxHeight="160"
-                    SelectionMode="None"
-                    IsItemClickEnabled="False"
-                    CanDragItems="True"
-                    CanReorderItems="False"
-                    AllowDrop="False"
-                    DragItemsStarting="PoolGrid_DragItemsStarting"
-                    ItemTemplate="{StaticResource PoolTileTemplate}" />
-            </StackPanel>
-        </Grid>
+        </Border>
     </Grid>
 </Page>

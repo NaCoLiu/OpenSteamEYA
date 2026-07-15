@@ -88,6 +88,47 @@ internal static class FormatHelper
         return description.Length > 0 ? Loc.Tf("Format_Cooldown_WithReason_Format", duration, description) : duration;
     }
 
+    /// <summary>秒级倒计时文案（天/时/分/秒），供实时递减的冷却倒计时使用；语义同 FormatCooldownText。</summary>
+    public static string FormatCooldownCountdownText(uint? seconds, uint? reason, string unknownText)
+    {
+        if (seconds is null)
+        {
+            return unknownText;
+        }
+
+        if (seconds == 0 || seconds > int.MaxValue)
+        {
+            return Loc.T("Format_Cooldown_None");
+        }
+
+        var countdown = FormatCountdown(seconds.Value);
+        var description = DescribePenaltyReason(reason);
+        return description.Length > 0 ? Loc.Tf("Format_Cooldown_WithReason_Format", countdown, description) : countdown;
+    }
+
+    /// <summary>把秒数渲染成带秒的倒计时串（省略前导为零的高位单位，始终显示秒）。</summary>
+    public static string FormatCountdown(uint seconds)
+    {
+        var days = seconds / 86400;
+        var hours = seconds % 86400 / 3600;
+        var minutes = seconds % 3600 / 60;
+        var secs = seconds % 60;
+
+        if (days > 0)
+        {
+            return Loc.Tf("Format_Countdown_DHMS_Format", days, hours, minutes, secs);
+        }
+
+        if (hours > 0)
+        {
+            return Loc.Tf("Format_Countdown_HMS_Format", hours, minutes, secs);
+        }
+
+        return minutes > 0
+            ? Loc.Tf("Format_Countdown_MS_Format", minutes, secs)
+            : Loc.Tf("Format_Countdown_S_Format", secs);
+    }
+
     /// <param name="vacBanned">GC VAC 标记：null 未知 / 0 无 / 其他 有标记。</param>
     /// <param name="unknownText">vacBanned 为 null 时的文案。</param>
     public static string FormatGcVacText(int? vacBanned, string unknownText) => vacBanned switch

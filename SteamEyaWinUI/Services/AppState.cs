@@ -22,6 +22,7 @@ internal static class AppState
     public static SteamCredentialsAuthService CredentialsAuthService { get; } = new();
     public static GitHubUpdateService UpdateService { get; } = new();
     public static SettingsService SettingsService { get; } = new();
+    public static Cs2CloudService Cs2CloudService { get; } = new();
 
     /// <summary>由 MainWindow 注入，向全局状态栏输出消息。</summary>
     public static Action<string, InfoBarSeverity>? StatusReporter { get; set; }
@@ -153,9 +154,14 @@ internal static class AppState
             UpdateCheckError = null;
             UpdateCheckedAt = update.CheckedAt;
 
+            // 自动检查发现新版本只亮「关于」导航项红点（UpdateStateChanged → MainWindow.RefreshUpdateBadge），
+            // 不再弹常驻横幅占用每页底部；手动检查才用状态栏明确反馈结果。
             if (update.IsUpdateAvailable)
             {
-                ShowStatus(Loc.Tf("AppState_Update_Available_Format", update.LatestTag), InfoBarSeverity.Warning);
+                if (!isAutomatic)
+                {
+                    ShowStatus(Loc.Tf("AppState_Update_Available_Format", update.LatestTag), InfoBarSeverity.Warning);
+                }
             }
             else if (!isAutomatic)
             {

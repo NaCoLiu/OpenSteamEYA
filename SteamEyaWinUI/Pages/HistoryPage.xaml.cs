@@ -28,6 +28,30 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
     /// <summary>搜索框去抖计时器：输入停止约 300ms 后才执行一次过滤，避免逐键击全量重建。</summary>
     private readonly DispatcherQueueTimer _searchDebounceTimer;
 
+    /// <summary>冷却倒计时刷新计时器：每秒通知在冷却中的账号刷新其倒计时绑定；无冷却账号时自动停表。</summary>
+    private readonly DispatcherQueueTimer _cooldownTimer;
+
+    /// <summary>上一 tick 仍在冷却的账号集合：用于在剩余归零那一 tick 补发一次刷新，把卡片刷成「无冷却」终态。</summary>
+    private readonly HashSet<SteamAccountHistoryItem> _cooldownLiveLastTick = [];
+
+    /// <summary>上一 tick 详情面板选中账号是否在冷却中（详情冷却行是命令式赋值，同样需要归零 tick 补刷一次）。</summary>
+    private bool _detailCooldownLiveLastTick;
+
+    /// <summary>当前详情面板备注框绑定的账号（失焦保存时据此定位，避免选择已切换后写错账号）。</summary>
+    private SteamAccountHistoryItem? _noteAccount;
+
+    /// <summary>「未分组」筛选项的 Tag 哨兵值（区别于 null=全部、具体分组 ID）。</summary>
+    private const string UngroupedSentinel = "__ungrouped__";
+
+    /// <summary>当前加载的分组定义（按 Order/名称排序），来自 settings.json。</summary>
+    private List<AccountGroup> _groups = [];
+
+    /// <summary>当前分组筛选：null=全部 / <see cref="UngroupedSentinel"/>=未分组 / 其它=分组 ID。</summary>
+    private string? _groupFilter;
+
+    /// <summary>重建筛选下拉时抑制 SelectionChanged 回调，避免重入重建。</summary>
+    private bool _suppressGroupFilterChange;
+
     /// <summary>页面是否处于活动（已导航到、未离开）状态，用于不可见时延迟重建。</summary>
     private bool _isActive;
 
@@ -60,6 +84,11 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
         _searchDebounceTimer.IsRepeating = false;
         _searchDebounceTimer.Tick += (_, _) => RebuildView(GetSelectedSteamId());
 
+        _cooldownTimer = DispatcherQueue.CreateTimer();
+        _cooldownTimer.Interval = TimeSpan.FromSeconds(1);
+        _cooldownTimer.IsRepeating = true;
+        _cooldownTimer.Tick += (_, _) => OnCooldownTick();
+
         AppState.HistoryChanged += OnHistoryChanged;
         AppState.BusyChanged += _ => UpdateControlsEnabled();
         Loc.LanguageChanged += OnLanguageChanged;
@@ -68,6 +97,7 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
         var pending = AppState.PendingHistorySelection;
         AppState.PendingHistorySelection = null;
         _allItems = AppState.HistoryAccounts;
+        LoadGroups();
         RebuildView(pending);
     }
 
@@ -83,6 +113,7 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
             // 静态 x:Bind 文本随 Strings 重算；命令式文本（详情/批量栏/摘要/控件状态）重跑对应方法即可换语言。
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Strings)));
             UpdateSummaryTexts();
+            RebuildGroupFilterCombo();
             UpdateBatchBar();
             UpdateDetail();
             UpdateControlsEnabled();
@@ -94,6 +125,9 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
         base.OnNavigatedTo(e);
         _isActive = true;
 
+        // 分组定义存于 settings.json（无变更事件），进入页面时重新加载以反映在别处的编辑。
+        LoadGroups();
+
         // 不可见期间累积的待选中意图优先于当前选择；ReloadHistory 会刷新快照并触发重建。
         var select = _pendingSelectSteamId ?? GetSelectedSteamId();
         _pendingSelectSteamId = null;
@@ -104,8 +138,9 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
     {
         base.OnNavigatedFrom(e);
         _isActive = false;
-        // 停掉去抖计时器，避免离开页面后 300ms 窗口内 Tick 仍对离屏页面触发一次无谓重建。
+        // 停掉去抖与倒计时计时器，避免离开页面后仍对离屏页面触发无谓刷新/重建。
         _searchDebounceTimer.Stop();
+        _cooldownTimer.Stop();
 
         // 悬停时被导航走，PointerExited 可能不触发；清掉残留悬停态，避免回来后空心勾选圈残留。
         foreach (var account in _allItems)
@@ -136,12 +171,13 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
 
     private void RebuildView(string? selectSteamId)
     {
-        // 过滤只在内存快照上做，不回读磁盘。
+        // 过滤只在内存快照上做，不回读磁盘。先按分组筛选，再按搜索词过滤。
         var source = _allItems;
         var filter = HistorySearchBox.Text.Trim();
-        var filtered = string.IsNullOrEmpty(filter)
-            ? source
-            : source.Where(account => Matches(account, filter)).ToList();
+        var filtered = source
+            .Where(MatchesGroupFilter)
+            .Where(account => string.IsNullOrEmpty(filter) || Matches(account, filter))
+            .ToList();
 
         // 批量勾选集按账号键跨重建保留：先剔除已不存在的账号，再把勾选状态套用到（可能是新的）实例。
         var liveKeys = source
@@ -178,6 +214,7 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
         UpdateBatchBar();
         UpdateDetail();
         UpdateControlsEnabled();
+        UpdateCooldownTimer();
     }
 
     /// <summary>按当前快照重算页头摘要与空状态文案（语言切换时也复用此处刷新已显示文本）。</summary>
@@ -197,7 +234,8 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
     {
         return Contains(account.AccountName, filter) ||
             Contains(account.PersonaName, filter) ||
-            Contains(account.SteamId, filter);
+            Contains(account.SteamId, filter) ||
+            Contains(account.Note, filter);
     }
 
     private static bool Contains(string? value, string filter)
@@ -963,6 +1001,18 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
             return;
         }
 
+        // 覆盖备注框前先保存正在编辑但尚未失焦的备注，避免后台 ReloadHistory/重建把改动冲掉。
+        // 记录 flush 前备注框是否正被编辑（有焦点）及其绑定账号键：后台重建时选中账号常是磁盘快照读出的新实例，
+        // 其 Note 仍是编辑前的旧值，若无条件回填会把用户正在输入的文本（连同光标）当场冲掉。
+        // 此处已越过开头的 AccountNameText null 守卫（可视树已加载），备注框同批生成、必非 null，直接访问。
+        var noteBoxHadFocus = HistoryDetailNoteBox.FocusState != FocusState.Unfocused;
+        var editingKey = _noteAccount is null
+            ? null
+            : AccountHistoryService.GetAccountKey(_noteAccount);
+        var inProgressNoteText = HistoryDetailNoteBox.Text;
+
+        FlushPendingNote();
+
         if (HistoryAccountList.SelectedItem is not SteamAccountHistoryItem account)
         {
             HistoryDetailAvatar.ProfilePicture = null;
@@ -976,6 +1026,8 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
             HistoryDetailCsLevelText.Text = Loc.T("History_Detail_Pending");
             HistoryDetailCooldownStatusText.Text = Loc.T("History_Detail_Pending");
             HistoryDetailAccountStatusText.Text = Loc.T("History_Detail_Pending");
+            HistoryDetailNoteBox.Text = string.Empty;
+            _noteAccount = null;
             return;
         }
 
@@ -988,8 +1040,821 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
         HistoryDetailLastLoginText.Text = account.LastLoginText;
         HistoryDetailCompetitiveScoreText.Text = account.CompetitiveScoreText;
         HistoryDetailCsLevelText.Text = account.CsPlayerLevelText;
-        HistoryDetailCooldownStatusText.Text = account.CooldownStatusText;
+        HistoryDetailCooldownStatusText.Text = account.RemainingCooldownStatusText;
         HistoryDetailAccountStatusText.Text = account.JwtAvailabilityText;
+
+        // 仍是同一账号且备注框正被编辑时，保留用户正在输入的文本（已在上面 flush 落盘），不用旧快照回填冲掉。
+        var sameAccountBeingEdited = noteBoxHadFocus && editingKey is not null &&
+            string.Equals(editingKey, AccountHistoryService.GetAccountKey(account), StringComparison.OrdinalIgnoreCase);
+        if (sameAccountBeingEdited)
+        {
+            // 让新实例的 Note 与界面正在显示的文本一致，避免下次失焦时因“框≠实例”触发一次多余的重复保存。
+            account.Note = string.IsNullOrWhiteSpace(inProgressNoteText) ? null : inProgressNoteText.Trim();
+        }
+        else
+        {
+            HistoryDetailNoteBox.Text = account.Note ?? string.Empty;
+        }
+
+        _noteAccount = account;
+    }
+
+    // ---------- 冷却倒计时（每秒刷新在冷却中的卡片与详情；全部到期后自动停表，省电） ----------
+
+    private void OnCooldownTick()
+    {
+        var anyLive = false;
+        var stillLive = new HashSet<SteamAccountHistoryItem>();
+        foreach (var account in _viewItems)
+        {
+            if (account.HasLiveCooldown)
+            {
+                account.NotifyCooldownTick();
+                stillLive.Add(account);
+                anyLive = true;
+            }
+            else if (_cooldownLiveLastTick.Contains(account))
+            {
+                // 上一 tick 还在冷却、这一 tick 已归零：HasLiveCooldown 翻 false 会让常规分支跳过它，
+                // 这里补发一次通知，把卡片从「1 秒」刷成「无冷却」终态（否则会永久停在最后的非零值）。
+                account.NotifyCooldownTick();
+            }
+        }
+
+        _cooldownLiveLastTick.Clear();
+        foreach (var account in stillLive)
+        {
+            _cooldownLiveLastTick.Add(account);
+        }
+
+        // 详情面板冷却行是命令式赋值（不随绑定自动更新），选中账号在冷却中、或刚好本 tick 归零时都要刷一次。
+        if (HistoryAccountList.SelectedItem is SteamAccountHistoryItem selected)
+        {
+            if (selected.HasLiveCooldown)
+            {
+                HistoryDetailCooldownStatusText.Text = selected.RemainingCooldownStatusText;
+                _detailCooldownLiveLastTick = true;
+                anyLive = true;
+            }
+            else if (_detailCooldownLiveLastTick)
+            {
+                HistoryDetailCooldownStatusText.Text = selected.RemainingCooldownStatusText;
+                _detailCooldownLiveLastTick = false;
+            }
+        }
+
+        if (!anyLive)
+        {
+            _cooldownTimer.Stop();
+        }
+    }
+
+    private void UpdateCooldownTimer()
+    {
+        var anyLive = _isActive && _viewItems.Any(account => account.HasLiveCooldown);
+        if (anyLive)
+        {
+            if (!_cooldownTimer.IsRunning)
+            {
+                _cooldownTimer.Start();
+            }
+        }
+        else
+        {
+            _cooldownTimer.Stop();
+        }
+    }
+
+    private void HistoryDetailNoteBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        FlushPendingNote();
+    }
+
+    // 把备注框里相对 _noteAccount 的未保存改动落盘（失焦时、以及每次覆盖备注框之前调用）。
+    // 幂等：无改动时直接返回，不刷屏；就地更新内存实例（卡片备注标记随 INPC 立即刷新），不整表重建。
+    private void FlushPendingNote()
+    {
+        var account = _noteAccount;
+        if (account is null || HistoryDetailNoteBox is null)
+        {
+            return;
+        }
+
+        var normalized = string.IsNullOrWhiteSpace(HistoryDetailNoteBox.Text)
+            ? null
+            : HistoryDetailNoteBox.Text.Trim();
+        if (string.Equals(normalized, account.Note, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        account.Note = normalized;
+        try
+        {
+            AppState.AccountHistoryService.SetNote(account, normalized);
+            AppState.ShowStatus(Loc.T("History_Status_NoteSaved"), InfoBarSeverity.Success);
+        }
+        catch (Exception ex)
+        {
+            AppState.ShowStatus(Loc.Tf("History_Status_NoteSaveFail_Format", ex.Message), InfoBarSeverity.Error);
+        }
+    }
+
+    // ---------- 批量导入白号（账号+密码换取 EYA 令牌入库；带 shared_secret 自动过 2FA，否则逐个输码） ----------
+
+    private sealed record WhiteAccountEntry(
+        string AccountName, string Password, string? SharedSecret, string? Email, string? EmailPassword);
+
+    private async void BatchImportWhiteButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isDialogFlowActive)
+        {
+            return;
+        }
+
+        var pasteBox = new TextBox
+        {
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
+            MinWidth = 420,
+            Height = 180,
+            IsSpellCheckEnabled = false,
+            PlaceholderText = Loc.T("History_WhiteImport_Placeholder")
+        };
+        var content = new StackPanel { Spacing = 8 };
+        content.Children.Add(new TextBlock
+        {
+            Text = Loc.T("History_WhiteImport_Hint"),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = FormatHelper.GetStatusBrush(InfoBarSeverity.Informational)
+        });
+        content.Children.Add(pasteBox);
+
+        var dialog = new ContentDialog
+        {
+            Title = Loc.T("History_WhiteImport_Title"),
+            Content = content,
+            PrimaryButtonText = Loc.T("Common_Import"),
+            CloseButtonText = Loc.T("Common_Cancel"),
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = XamlRoot
+        };
+
+        string pasteText;
+        _isDialogFlowActive = true;
+        try
+        {
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+            {
+                return;
+            }
+
+            pasteText = pasteBox.Text;
+        }
+        finally
+        {
+            _isDialogFlowActive = false;
+        }
+
+        var entries = ParseWhiteAccounts(pasteText);
+        if (entries.Count == 0)
+        {
+            AppState.ShowStatus(Loc.T("History_WhiteImport_NoneParsed"), InfoBarSeverity.Error);
+            return;
+        }
+
+        var cancellationToken = AppState.BeginBusyOperation();
+        var added = 0;
+        var failed = 0;
+        var canceled = false;
+        string? lastSteamId = null;
+
+        try
+        {
+            for (var i = 0; i < entries.Count; i++)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    canceled = true;
+                    break;
+                }
+
+                var entry = entries[i];
+                AppState.ShowStatus(
+                    Loc.Tf("History_WhiteImport_Progress_Format", i + 1, entries.Count, entry.AccountName),
+                    InfoBarSeverity.Informational);
+
+                var progress = new Progress<string>(message =>
+                    AppState.ShowStatus(
+                        Loc.Tf("Common_LabelValue_Format", entry.AccountName, message),
+                        InfoBarSeverity.Informational));
+
+                // 带 shared_secret 的手机令牌自动生成验证码（无人值守）；邮箱验证则弹窗提示去对应邮箱查收后输码。
+                async Task<string?> GuardProvider(SteamGuardPrompt prompt, CancellationToken token)
+                {
+                    if (prompt.Type == SteamGuardType.DeviceCode && !string.IsNullOrWhiteSpace(entry.SharedSecret))
+                    {
+                        var code = SteamTotp.GenerateAuthCode(entry.SharedSecret);
+                        if (!string.IsNullOrEmpty(code))
+                        {
+                            return code;
+                        }
+                    }
+
+                    var emailHint = prompt.Type == SteamGuardType.EmailCode ? entry.Email : null;
+                    return await PromptGuardCodeAsync(prompt, token, emailHint);
+                }
+
+                try
+                {
+                    var result = await AppState.CredentialsAuthService.GetRefreshTokenAsync(
+                        entry.AccountName, entry.Password, GuardProvider, progress, cancellationToken);
+
+                    var token = FormatHelper.NormalizeToken(result.RefreshToken);
+                    var info = AppState.JwtTokenService.Inspect(token);
+                    await AppState.AccountHistoryService.SaveLoginAsync(
+                        result.AccountName, result.SteamId, token, info.ExpiresAt);
+                    lastSteamId = result.SteamId;
+                    added++;
+                }
+                catch (OperationCanceledException)
+                {
+                    // 区分「用户点了全局取消」与「只是某个账号的验证码弹窗被取消/留空确认」：
+                    // 前者才中止整批；后者只把该账号计为失败并继续导入其余账号。
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        canceled = true;
+                        break;
+                    }
+
+                    failed++;
+                    AppLog.Warn($"批量导入白号：跳过 {entry.AccountName}（验证码环节被取消）。");
+                }
+                catch (Exception ex)
+                {
+                    failed++;
+                    AppLog.Warn($"批量导入白号失败：{entry.AccountName}，{ex.Message}");
+                }
+            }
+
+            AppState.ReloadHistory(lastSteamId);
+            AppState.ShowStatus(
+                canceled
+                    ? Loc.Tf("History_WhiteImport_Canceled_Format", added, failed)
+                    : Loc.Tf("History_WhiteImport_Done_Format", added, failed),
+                canceled ? InfoBarSeverity.Informational : InfoBarSeverity.Success);
+        }
+        finally
+        {
+            // 尽早丢弃明文密码/shared_secret 引用（字符串不可清零，至少缩短其在堆上的可达时长）。
+            entries.Clear();
+            AppState.EndBusyOperation();
+        }
+    }
+
+    // 解析批量白号文本：每行「账号----密码」或「账号----密码----shared_secret」，也兼容空白分隔。
+    private static List<WhiteAccountEntry> ParseWhiteAccounts(string text)
+    {
+        var list = new List<WhiteAccountEntry>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var rawLine in text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
+            var parts = line.Contains("----", StringComparison.Ordinal)
+                ? line.Split("----", StringSplitOptions.None)
+                : line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2)
+            {
+                continue;
+            }
+
+            var accountName = parts[0].Trim();
+            var password = parts[1].Trim();
+            if (accountName.Length == 0 || password.Length == 0)
+            {
+                continue;
+            }
+
+            // 其余列：含 @ 的视为邮箱（其后一列为邮箱密码），非邮箱列视为 shared_secret。兼容
+            // 「账号----密码」「账号----密码----shared_secret」「账号----密码----邮箱----邮箱密码」。
+            string? sharedSecret = null, email = null, emailPassword = null;
+            for (var i = 2; i < parts.Length; i++)
+            {
+                var field = parts[i].Trim();
+                if (field.Length == 0)
+                {
+                    continue;
+                }
+
+                if (email is null && field.Contains('@'))
+                {
+                    email = field;
+                    if (i + 1 < parts.Length)
+                    {
+                        var pwd = parts[i + 1].Trim();
+                        emailPassword = pwd.Length == 0 ? null : pwd;
+                        i++;
+                    }
+                }
+                else
+                {
+                    sharedSecret ??= field;
+                }
+            }
+
+            // 同一账号多行取第一行。
+            if (!seen.Add(accountName))
+            {
+                continue;
+            }
+
+            list.Add(new WhiteAccountEntry(accountName, password, sharedSecret, email, emailPassword));
+        }
+
+        return list;
+    }
+
+    // 令牌验证器需要输码时弹窗索取邮箱/手机验证码（无 shared_secret 的账号）；取消返回 null。
+    // emailHint：邮箱验证时把该账号绑定邮箱显示出来，方便去对应邮箱查收验证码。
+    private async Task<string?> PromptGuardCodeAsync(
+        SteamGuardPrompt prompt, CancellationToken cancellationToken, string? emailHint = null)
+    {
+        var isMobile = prompt.Type == SteamGuardType.DeviceCode;
+
+        var codeBox = new TextBox
+        {
+            PlaceholderText = Loc.T("Creds_Guard_CodePlaceholder"),
+            IsSpellCheckEnabled = false,
+            MaxLength = 10,
+            Margin = new Thickness(0, 12, 0, 0)
+        };
+
+        var panel = new StackPanel { Spacing = 4 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = string.IsNullOrWhiteSpace(prompt.AssociatedMessage)
+                ? Loc.T(isMobile ? "Creds_Guard_MobileMessage" : "Creds_Guard_EmailMessage")
+                : prompt.AssociatedMessage,
+            TextWrapping = TextWrapping.Wrap
+        });
+        if (!string.IsNullOrWhiteSpace(emailHint))
+        {
+            panel.Children.Add(new TextBlock
+            {
+                Text = Loc.Tf("Creds_Guard_EmailAt_Format", emailHint),
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = FormatHelper.GetStatusBrush(InfoBarSeverity.Informational)
+            });
+        }
+
+        panel.Children.Add(codeBox);
+
+        var dialog = new ContentDialog
+        {
+            Title = Loc.T(isMobile ? "Creds_Guard_MobileTitle" : "Creds_Guard_EmailTitle"),
+            Content = panel,
+            PrimaryButtonText = Loc.T("Common_Confirm"),
+            CloseButtonText = Loc.T("Common_Cancel"),
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = XamlRoot
+        };
+
+        var result = await dialog.ShowAsync();
+        return result == ContentDialogResult.Primary ? codeBox.Text.Trim() : null;
+    }
+
+    // ---------- 批量一键查询（对所有已勾选账号依次查询，复用全局忙碌+取消机制） ----------
+
+    private async void BatchQueryButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppState.LoginPage is not { } loginPage)
+        {
+            AppState.ShowStatus(Loc.T("History_Status_LoginPageNotReady"), InfoBarSeverity.Error);
+            return;
+        }
+
+        var accounts = GetCheckedAccounts();
+        if (accounts.Count == 0)
+        {
+            AppState.ShowStatus(Loc.T("History_Status_NoneToQuery"), InfoBarSeverity.Error);
+            return;
+        }
+
+        var cancellationToken = AppState.BeginBusyOperation();
+        var succeeded = 0;
+        var failed = 0;
+        var canceled = false;
+
+        try
+        {
+            for (var i = 0; i < accounts.Count; i++)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    canceled = true;
+                    break;
+                }
+
+                var account = accounts[i];
+                AppState.ShowStatus(
+                    Loc.Tf("History_Status_BatchQuerying_Format", i + 1, accounts.Count, account.AccountTitle),
+                    InfoBarSeverity.Informational);
+
+                try
+                {
+                    await loginPage.QueryAndSaveCsStatusAsync(account.AccountName, account.EyaToken, cancellationToken);
+                    succeeded++;
+                }
+                catch (OperationCanceledException)
+                {
+                    canceled = true;
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    failed++;
+                    AppLog.Warn($"批量查询账号失败：{account.AccountTitle}，{ex.Message}");
+                }
+            }
+
+            AppState.ShowStatus(
+                canceled
+                    ? Loc.Tf("History_Status_BatchQueryCanceled_Format", succeeded, failed)
+                    : Loc.Tf("History_Status_BatchQueryDone_Format", succeeded, failed),
+                canceled ? InfoBarSeverity.Informational : InfoBarSeverity.Success);
+        }
+        finally
+        {
+            AppState.EndBusyOperation();
+        }
+    }
+
+    // ---------- 账号分组（定义存 settings.json，成员关系存各账号 GroupIds） ----------
+
+    private void LoadGroups()
+    {
+        _groups = AppState.SettingsService.Load().Groups
+            .OrderBy(group => group.Order)
+            .ThenBy(group => group.Name, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
+        RebuildGroupFilterCombo();
+    }
+
+    private void RebuildGroupFilterCombo()
+    {
+        if (GroupFilterCombo is null)
+        {
+            return;
+        }
+
+        _suppressGroupFilterChange = true;
+        GroupFilterCombo.Items.Clear();
+        GroupFilterCombo.Items.Add(new ComboBoxItem { Content = Loc.T("History_Group_Filter_All"), Tag = null });
+        foreach (var group in _groups)
+        {
+            GroupFilterCombo.Items.Add(new ComboBoxItem { Content = group.Name, Tag = group.Id });
+        }
+
+        GroupFilterCombo.Items.Add(new ComboBoxItem
+        {
+            Content = Loc.T("History_Group_Filter_Ungrouped"),
+            Tag = UngroupedSentinel
+        });
+
+        // 恢复上次筛选；对应分组已被删则回落到「全部」。
+        var target = GroupFilterCombo.Items
+            .OfType<ComboBoxItem>()
+            .FirstOrDefault(item => string.Equals(item.Tag as string, _groupFilter, StringComparison.Ordinal));
+        if (target is null)
+        {
+            _groupFilter = null;
+            target = (ComboBoxItem)GroupFilterCombo.Items[0];
+        }
+
+        GroupFilterCombo.SelectedItem = target;
+        _suppressGroupFilterChange = false;
+    }
+
+    private void GroupFilterCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressGroupFilterChange)
+        {
+            return;
+        }
+
+        _groupFilter = (GroupFilterCombo.SelectedItem as ComboBoxItem)?.Tag as string;
+        RebuildView(GetSelectedSteamId());
+    }
+
+    private bool MatchesGroupFilter(SteamAccountHistoryItem account)
+    {
+        if (_groupFilter is null)
+        {
+            return true;
+        }
+
+        if (_groupFilter == UngroupedSentinel)
+        {
+            return account.GroupIds is not { Count: > 0 };
+        }
+
+        return account.GroupIds is { Count: > 0 } && account.GroupIds.Contains(_groupFilter);
+    }
+
+    private void BatchGroupFlyout_Opening(object sender, object e)
+    {
+        BatchGroupFlyout.Items.Clear();
+        var accounts = GetCheckedAccounts();
+
+        foreach (var group in _groups)
+        {
+            var allMembers = accounts.Count > 0 && accounts.All(account => account.GroupIds.Contains(group.Id));
+            var toggle = new ToggleMenuFlyoutItem { Text = group.Name, IsChecked = allMembers };
+            var groupId = group.Id;
+            var add = !allMembers;
+            toggle.Click += (_, _) => ApplyBatchGroup(groupId, add);
+            BatchGroupFlyout.Items.Add(toggle);
+        }
+
+        if (_groups.Count > 0)
+        {
+            BatchGroupFlyout.Items.Add(new MenuFlyoutSeparator());
+        }
+
+        var newItem = new MenuFlyoutItem { Text = Loc.T("History_Group_NewAndAdd") };
+        newItem.Click += async (_, _) => await CreateGroupAndAddSelectedAsync();
+        BatchGroupFlyout.Items.Add(newItem);
+
+        var manageItem = new MenuFlyoutItem { Text = Loc.T("History_Group_Manage") };
+        manageItem.Click += async (_, _) => await ManageGroupsAsync();
+        BatchGroupFlyout.Items.Add(manageItem);
+    }
+
+    private void ApplyBatchGroup(string groupId, bool add)
+    {
+        var accounts = GetCheckedAccounts();
+        if (accounts.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var changed = AppState.AccountHistoryService.SetGroupMembership(accounts, groupId, add);
+            AppState.ReloadHistory(GetSelectedSteamId());
+            var groupName = _groups.FirstOrDefault(group => group.Id == groupId)?.Name ?? string.Empty;
+            AppState.ShowStatus(
+                add
+                    ? Loc.Tf("History_Status_GroupAdded_Format", changed, groupName)
+                    : Loc.Tf("History_Status_GroupRemoved_Format", changed, groupName),
+                InfoBarSeverity.Success);
+        }
+        catch (Exception ex)
+        {
+            // accounts.json 被占用/损坏时 SetGroupMembership 会抛（与删除/清空/导入一致），
+            // 事件处理器里不接就会经未处理异常终止进程；这里与其它变更路径一样降级为状态栏报错。
+            AppLog.Warn($"批量分组变更失败：{ex.Message}");
+            AppState.ShowStatus(ex.Message, InfoBarSeverity.Error);
+        }
+    }
+
+    private async Task CreateGroupAndAddSelectedAsync()
+    {
+        var name = await PromptGroupNameAsync(Loc.T("History_Group_NewDialog_Title"), string.Empty);
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return;
+        }
+
+        try
+        {
+            var group = CreateGroup(name);
+            var accounts = GetCheckedAccounts();
+            if (accounts.Count > 0)
+            {
+                AppState.AccountHistoryService.SetGroupMembership(accounts, group.Id, true);
+            }
+
+            AppState.ReloadHistory(GetSelectedSteamId());
+            AppState.ShowStatus(Loc.Tf("History_Status_GroupCreated_Format", group.Name), InfoBarSeverity.Success);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"新建分组并加入失败：{ex.Message}");
+            AppState.ShowStatus(ex.Message, InfoBarSeverity.Error);
+        }
+    }
+
+    private static AccountGroup CreateGroup(string name)
+    {
+        var settings = AppState.SettingsService.Load();
+        var group = new AccountGroup { Name = name.Trim(), Order = settings.Groups.Count };
+        settings.Groups.Add(group);
+        AppState.SettingsService.Save(settings);
+        return group;
+    }
+
+    private async void ManageGroupsButton_Click(object sender, RoutedEventArgs e)
+    {
+        await ManageGroupsAsync();
+    }
+
+    private async Task<string?> PromptGroupNameAsync(string title, string initial)
+    {
+        if (_isDialogFlowActive)
+        {
+            return null;
+        }
+
+        var box = new TextBox
+        {
+            Text = initial,
+            PlaceholderText = Loc.T("History_Group_Name_Placeholder"),
+            AcceptsReturn = false
+        };
+        var dialog = new ContentDialog
+        {
+            Title = title,
+            Content = box,
+            PrimaryButtonText = Loc.T("Common_Confirm"),
+            CloseButtonText = Loc.T("Common_Cancel"),
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = XamlRoot
+        };
+
+        _isDialogFlowActive = true;
+        try
+        {
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+            {
+                return null;
+            }
+
+            return string.IsNullOrWhiteSpace(box.Text) ? null : box.Text.Trim();
+        }
+        finally
+        {
+            _isDialogFlowActive = false;
+        }
+    }
+
+    private async Task ManageGroupsAsync()
+    {
+        if (_isDialogFlowActive)
+        {
+            return;
+        }
+
+        LoadGroups();
+
+        var newNameBox = new TextBox
+        {
+            PlaceholderText = Loc.T("History_Group_Name_Placeholder"),
+            AcceptsReturn = false
+        };
+        var addButton = new Button { Content = Loc.T("History_Group_Add") };
+        var addRow = new Grid { ColumnSpacing = 8 };
+        addRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        addRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(addButton, 1);
+        addRow.Children.Add(newNameBox);
+        addRow.Children.Add(addButton);
+
+        var listPanel = new StackPanel { Spacing = 6 };
+        var root = new StackPanel { Spacing = 12, MinWidth = 380 };
+        root.Children.Add(addRow);
+        root.Children.Add(listPanel);
+
+        void RebuildRows()
+        {
+            listPanel.Children.Clear();
+            LoadGroups();
+
+            if (_groups.Count == 0)
+            {
+                listPanel.Children.Add(new TextBlock
+                {
+                    Text = Loc.T("History_Group_Manage_Empty"),
+                    Foreground = FormatHelper.GetStatusBrush(InfoBarSeverity.Informational)
+                });
+                return;
+            }
+
+            foreach (var group in _groups)
+            {
+                var count = AppState.HistoryAccounts.Count(account =>
+                    account.GroupIds is { Count: > 0 } && account.GroupIds.Contains(group.Id));
+                var groupId = group.Id;
+
+                var nameBox = new TextBox { Text = group.Name, VerticalAlignment = VerticalAlignment.Center };
+                nameBox.LostFocus += (_, _) => RenameGroup(groupId, nameBox.Text);
+
+                var countText = new TextBlock
+                {
+                    Text = Loc.Tf("History_Group_Manage_Count_Format", count),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Foreground = FormatHelper.GetStatusBrush(InfoBarSeverity.Informational)
+                };
+
+                var deleteButton = new Button { Content = new FontIcon { Glyph = "", FontSize = 14 } };
+                deleteButton.Click += (_, _) =>
+                {
+                    DeleteGroup(groupId);
+                    RebuildRows();
+                };
+
+                var row = new Grid { ColumnSpacing = 8 };
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                Grid.SetColumn(countText, 1);
+                Grid.SetColumn(deleteButton, 2);
+                row.Children.Add(nameBox);
+                row.Children.Add(countText);
+                row.Children.Add(deleteButton);
+                listPanel.Children.Add(row);
+            }
+        }
+
+        addButton.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(newNameBox.Text))
+            {
+                return;
+            }
+
+            CreateGroup(newNameBox.Text);
+            newNameBox.Text = string.Empty;
+            RebuildRows();
+        };
+
+        RebuildRows();
+
+        var dialog = new ContentDialog
+        {
+            Title = Loc.T("History_Group_Manage"),
+            Content = new ScrollViewer { Content = root, MaxHeight = 420 },
+            CloseButtonText = Loc.T("Common_Close"),
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot
+        };
+
+        _isDialogFlowActive = true;
+        try
+        {
+            await dialog.ShowAsync();
+        }
+        finally
+        {
+            _isDialogFlowActive = false;
+        }
+
+        // 对话框里可能改了名/删了组：刷新筛选下拉与列表。
+        LoadGroups();
+        RebuildView(GetSelectedSteamId());
+    }
+
+    private static void RenameGroup(string id, string newName)
+    {
+        newName = newName.Trim();
+        if (string.IsNullOrWhiteSpace(newName))
+        {
+            return;
+        }
+
+        var settings = AppState.SettingsService.Load();
+        var group = settings.Groups.FirstOrDefault(item => item.Id == id);
+        if (group is null || string.Equals(group.Name, newName, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        group.Name = newName;
+        AppState.SettingsService.Save(settings);
+    }
+
+    private void DeleteGroup(string id)
+    {
+        try
+        {
+            var settings = AppState.SettingsService.Load();
+            settings.Groups.RemoveAll(item => item.Id == id);
+            AppState.SettingsService.Save(settings);
+            AppState.AccountHistoryService.RemoveGroupFromAllAccounts(id);
+            AppState.ReloadHistory(GetSelectedSteamId());
+        }
+        catch (Exception ex)
+        {
+            // RemoveGroupFromAllAccounts 在 accounts.json 不可读时会抛，管理分组对话框里不接会崩掉整个应用。
+            AppLog.Warn($"删除分组失败：{ex.Message}");
+            AppState.ShowStatus(ex.Message, InfoBarSeverity.Error);
+        }
     }
 
     private void UpdateControlsEnabled()
@@ -1000,13 +1865,18 @@ public sealed partial class HistoryPage : Page, INotifyPropertyChanged
         RefreshHistoryButton.IsEnabled = !isBusy;
         HistorySearchBox.IsEnabled = !isBusy;
         ImportHistoryButton.IsEnabled = !isBusy;
+        BatchImportWhiteButton.IsEnabled = !isBusy;
         ClearHistoryButton.IsEnabled = !isBusy && AppState.HistoryAccounts.Count > 0;
         ClearInvalidAccountsButton.IsEnabled = !isBusy && AppState.HistoryAccounts.Count > 0;
         OneClickHistoryQueryButton.IsEnabled = !isBusy && hasActive;
         UseHistoryAccountButton.IsEnabled = !isBusy && hasActive;
         BatchClearButton.IsEnabled = !isBusy;
+        BatchQueryButton.IsEnabled = !isBusy;
+        BatchGroupButton.IsEnabled = !isBusy;
         BatchExportButton.IsEnabled = !isBusy;
         BatchDeleteButton.IsEnabled = !isBusy;
+        GroupFilterCombo.IsEnabled = !isBusy;
+        ManageGroupsButton.IsEnabled = !isBusy;
 
         // 取消按钮仅忙碌时出现且保持可用，让用户中断本页发起的一键查询。
         CancelHistoryQueryButton.Visibility = isBusy ? Visibility.Visible : Visibility.Collapsed;

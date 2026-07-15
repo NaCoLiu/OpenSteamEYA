@@ -93,6 +93,7 @@ public sealed partial class SettingsPage : Page, INotifyPropertyChanged
 
         DataFolderPathText.Text = AppState.SettingsService.AppFolderPath;
         UpdateSteamPathText();
+        RefreshCs2SyncSources();
     }
 
     /// <summary>显示当前持久化的 Steam 安装目录；未设置时显示占位文案（启动会自动检测）。</summary>
@@ -143,6 +144,134 @@ public sealed partial class SettingsPage : Page, INotifyPropertyChanged
         {
             UpdateSteamPathText();
             AppState.ShowStatus(Loc.T("Settings_SteamPath_Changed"), InfoBarSeverity.Success);
+        }
+    }
+
+    // ---------- CS2 设置同步（issue #10）：来源账号 + 登录时强推 + 立即推送 ----------
+
+    private async void RefreshCs2SyncSources()
+    {
+        // userdata 目录解析 + 扫描来源账号都放后台线程：大 userdata / 慢盘时不再卡住设置页导航。
+        // userdata 路径与「立即推送」一致走 ResolvePathsOrThrow（带自动探测回退），
+        // 修掉“未持久化 Steam 路径时下拉恒空、但立即推送却能工作”的不一致。
+        var sources = await Task.Run(() =>
+        {
+            try
+            {
+                var userdataPath = SteamPathCoordinator.ResolvePathsOrThrow().UserdataPath;
+                return AppState.Cs2CloudService.EnumerateSources(userdataPath);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warn($"扫描 CS2 设置来源账号失败：{ex.Message}");
+                return (IReadOnlyList<Cs2SettingsSource>)Array.Empty<Cs2SettingsSource>();
+            }
+        });
+
+        _syncing = true;
+        try
+        {
+            Cs2SyncSourceCombo.Items.Clear();
+            foreach (var source in sources)
+            {
+                Cs2SyncSourceCombo.Items.Add(new ComboBoxItem
+                {
+                    Content = DescribeAccount(source.SteamId64),
+                    Tag = source.SteamId64
+                });
+            }
+
+            var settings = AppState.SettingsService.Load();
+            Cs2SyncToggle.IsOn = settings.Cs2SyncOnLogin;
+            Cs2SyncSourceCombo.SelectedItem = FindByTag(Cs2SyncSourceCombo, settings.Cs2SyncSourceSteamId ?? string.Empty);
+        }
+        finally
+        {
+            _syncing = false;
+        }
+    }
+
+    // 来源账号显示名：优先用历史账号里的昵称/账户名，找不到就显示 SteamID64。
+    private static string DescribeAccount(string steamId64)
+    {
+        var account = AppState.HistoryAccounts.FirstOrDefault(item =>
+            string.Equals(item.SteamId, steamId64, StringComparison.OrdinalIgnoreCase));
+        if (account is null)
+        {
+            return steamId64;
+        }
+
+        var name = !string.IsNullOrWhiteSpace(account.PersonaName) ? account.PersonaName : account.AccountName;
+        return string.IsNullOrWhiteSpace(name)
+            ? steamId64
+            : Loc.Tf("Settings_Cs2Sync_SourceItem_Format", name, steamId64);
+    }
+
+    private void Cs2SyncToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_syncing)
+        {
+            return;
+        }
+
+        var settings = AppState.SettingsService.Load();
+        settings.Cs2SyncOnLogin = Cs2SyncToggle.IsOn;
+        AppState.SettingsService.Save(settings);
+    }
+
+    private void Cs2SyncSourceCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_syncing)
+        {
+            return;
+        }
+
+        var steamId = (Cs2SyncSourceCombo.SelectedItem as ComboBoxItem)?.Tag as string;
+        var settings = AppState.SettingsService.Load();
+        settings.Cs2SyncSourceSteamId = string.IsNullOrWhiteSpace(steamId) ? null : steamId;
+        AppState.SettingsService.Save(settings);
+    }
+
+    private void Cs2SyncRefreshButton_Click(object sender, RoutedEventArgs e)
+    {
+        RefreshCs2SyncSources();
+    }
+
+    private async void Cs2SyncPushNowButton_Click(object sender, RoutedEventArgs e)
+    {
+        var source = AppState.SettingsService.Load().Cs2SyncSourceSteamId;
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            AppState.ShowStatus(Loc.T("Cs2Cloud_Error_NoSourceSelected"), InfoBarSeverity.Error);
+            return;
+        }
+
+        AppState.ShowStatus(Loc.T("Cs2Cloud_Progress_Pushing"), InfoBarSeverity.Informational);
+        // 推送期间禁用按钮，避免重复点击排队多次串行推送。
+        Cs2SyncPushNowButton.IsEnabled = false;
+        try
+        {
+            var result = await Task.Run(() =>
+            {
+                try
+                {
+                    var paths = SteamPathCoordinator.ResolvePathsOrThrow();
+                    return AppState.Cs2CloudService.PushSourceNow(paths, source);
+                }
+                catch (Exception ex)
+                {
+                    return new Cs2CloudPushResult(false, 0, ex.Message);
+                }
+            });
+
+            var severity = !result.Ok
+                ? InfoBarSeverity.Error
+                : result.AccountCloudDisabled ? InfoBarSeverity.Warning : InfoBarSeverity.Success;
+            AppState.ShowStatus(Cs2CloudService.DescribeResult(result), severity);
+        }
+        finally
+        {
+            Cs2SyncPushNowButton.IsEnabled = true;
         }
     }
 

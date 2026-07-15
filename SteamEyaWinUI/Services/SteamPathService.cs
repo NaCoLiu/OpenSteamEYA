@@ -135,7 +135,8 @@ internal sealed class SteamPathService
         var paths = new SteamPaths(
             normalized,
             Path.Combine(localAppData, "Steam", "local.vdf"),
-            Path.Combine(normalized, "config"));
+            Path.Combine(normalized, "config"),
+            Path.Combine(normalized, "userdata"));
         AppLog.Info($"使用 Steam 安装目录=\"{normalized}\"  config 目录=\"{paths.ConfigPath}\"  local.vdf=\"{paths.LocalVdfPath}\"");
         return paths;
     }

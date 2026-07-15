@@ -68,24 +68,36 @@
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
 
-                    <Button
-                        x:Name="ImportHistoryButton"
-                        Click="ImportHistoryButton_Click"
-                        ToolTipService.ToolTip="{x:Bind Strings.Get('History_Import_Tooltip'), Mode=OneWay}">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <FontIcon Glyph="&#xE77F;" FontSize="16" />
-                            <TextBlock Text="{x:Bind Strings.Get('Common_Import'), Mode=OneWay}" />
-                        </StackPanel>
-                    </Button>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button
+                            x:Name="ImportHistoryButton"
+                            Click="ImportHistoryButton_Click"
+                            ToolTipService.ToolTip="{x:Bind Strings.Get('History_Import_Tooltip'), Mode=OneWay}">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE77F;" FontSize="16" />
+                                <TextBlock Text="{x:Bind Strings.Get('Common_Import'), Mode=OneWay}" />
+                            </StackPanel>
+                        </Button>
+                        <Button
+                            x:Name="BatchImportWhiteButton"
+                            Click="BatchImportWhiteButton_Click"
+                            ToolTipService.ToolTip="{x:Bind Strings.Get('History_WhiteImport_Tooltip'), Mode=OneWay}">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE710;" FontSize="16" />
+                                <TextBlock Text="{x:Bind Strings.Get('History_WhiteImport_Button'), Mode=OneWay}" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
 
+                    <!-- 破坏性操作：红色标识，与已缓存账号页「清空」一致。 -->
                     <Button
                         x:Name="ClearInvalidAccountsButton"
                         Grid.Column="1"
                         Click="ClearInvalidAccountsButton_Click"
                         ToolTipService.ToolTip="{x:Bind Strings.Get('History_ClearInvalid_Tooltip'), Mode=OneWay}">
                         <StackPanel Orientation="Horizontal" Spacing="8">
-                            <FontIcon Glyph="&#xE894;" FontSize="16" />
-                            <TextBlock Text="{x:Bind Strings.Get('History_ClearInvalid_Button'), Mode=OneWay}" />
+                            <FontIcon Glyph="&#xE894;" FontSize="16" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                            <TextBlock Text="{x:Bind Strings.Get('History_ClearInvalid_Button'), Mode=OneWay}" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
                         </StackPanel>
                     </Button>
 
@@ -95,10 +107,36 @@
                         Click="ClearHistoryButton_Click"
                         ToolTipService.ToolTip="{x:Bind Strings.Get('History_ClearAll_Tooltip'), Mode=OneWay}">
                         <StackPanel Orientation="Horizontal" Spacing="8">
-                            <FontIcon Glyph="&#xE75C;" FontSize="16" />
-                            <TextBlock Text="{x:Bind Strings.Get('Common_Clear'), Mode=OneWay}" />
+                            <FontIcon Glyph="&#xE75C;" FontSize="16" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                            <TextBlock Text="{x:Bind Strings.Get('Common_Clear'), Mode=OneWay}" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
                         </StackPanel>
                     </Button>
+
+                    <StackPanel
+                        Grid.Column="3"
+                        Orientation="Horizontal"
+                        Spacing="8"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Center">
+                        <FontIcon
+                            Glyph="&#xE8EC;"
+                            FontSize="14"
+                            VerticalAlignment="Center"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <ComboBox
+                            x:Name="GroupFilterCombo"
+                            MinWidth="128"
+                            VerticalAlignment="Center"
+                            SelectionChanged="GroupFilterCombo_SelectionChanged"
+                            ToolTipService.ToolTip="{x:Bind Strings.Get('History_Group_Filter_Tooltip'), Mode=OneWay}" />
+                        <Button
+                            x:Name="ManageGroupsButton"
+                            VerticalAlignment="Center"
+                            Click="ManageGroupsButton_Click"
+                            ToolTipService.ToolTip="{x:Bind Strings.Get('History_Group_Manage'), Mode=OneWay}">
+                            <FontIcon Glyph="&#xE713;" FontSize="14" />
+                        </Button>
+                    </StackPanel>
                 </Grid>
 
                 <ListView
@@ -145,17 +183,31 @@
                                             Grid.Column="1"
                                             Spacing="2"
                                             VerticalAlignment="Center">
-                                            <TextBlock
-                                                Text="{x:Bind AccountTitle}"
-                                                FontSize="15"
-                                                FontWeight="SemiBold"
-                                                TextTrimming="CharacterEllipsis" />
+                                            <Grid ColumnSpacing="6">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock
+                                                    Text="{x:Bind AccountTitle}"
+                                                    FontSize="15"
+                                                    FontWeight="SemiBold"
+                                                    TextTrimming="CharacterEllipsis" />
+                                                <FontIcon
+                                                    Grid.Column="1"
+                                                    Glyph="&#xE70B;"
+                                                    FontSize="12"
+                                                    VerticalAlignment="Center"
+                                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                    Visibility="{x:Bind NoteIndicatorVisibility, Mode=OneWay}"
+                                                    ToolTipService.ToolTip="{loc:Localize Key=History_Card_Note_Tooltip}" />
+                                            </Grid>
                                             <TextBlock
                                                 Text="{x:Bind PersonaDisplayName}"
                                                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                                 TextTrimming="CharacterEllipsis" />
                                             <TextBlock
-                                                Text="{x:Bind CooldownSummaryText}"
+                                                Text="{x:Bind RemainingCooldownSummaryText, Mode=OneWay}"
                                                 Style="{StaticResource CaptionTextBlockStyle}"
                                                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                                 TextTrimming="CharacterEllipsis" />
@@ -304,6 +356,8 @@
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
                             x:Name="BatchSelectionText"
@@ -316,8 +370,30 @@
                             Click="BatchClearButton_Click"
                             Content="{x:Bind Strings.Get('Common_ClearSelection'), Mode=OneWay}" />
                         <Button
-                            x:Name="BatchExportButton"
+                            x:Name="BatchQueryButton"
                             Grid.Column="2"
+                            Click="BatchQueryButton_Click"
+                            ToolTipService.ToolTip="{x:Bind Strings.Get('History_BatchQuery_Tooltip'), Mode=OneWay}">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE9D9;" FontSize="14" />
+                                <TextBlock Text="{x:Bind Strings.Get('Common_BatchQuery'), Mode=OneWay}" />
+                            </StackPanel>
+                        </Button>
+                        <Button
+                            x:Name="BatchGroupButton"
+                            Grid.Column="3"
+                            ToolTipService.ToolTip="{x:Bind Strings.Get('History_BatchGroup_Tooltip'), Mode=OneWay}">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE8FD;" FontSize="14" />
+                                <TextBlock Text="{x:Bind Strings.Get('Common_BatchGroup'), Mode=OneWay}" />
+                            </StackPanel>
+                            <Button.Flyout>
+                                <MenuFlyout x:Name="BatchGroupFlyout" Opening="BatchGroupFlyout_Opening" />
+                            </Button.Flyout>
+                        </Button>
+                        <Button
+                            x:Name="BatchExportButton"
+                            Grid.Column="4"
                             Click="BatchExportButton_Click"
                             ToolTipService.ToolTip="{x:Bind Strings.Get('History_BatchExport_Tooltip'), Mode=OneWay}">
                             <StackPanel Orientation="Horizontal" Spacing="6">
@@ -325,14 +401,15 @@
                                 <TextBlock Text="{x:Bind Strings.Get('Common_BatchExport'), Mode=OneWay}" />
                             </StackPanel>
                         </Button>
+                        <!-- 批量删除：破坏性，红色标识。 -->
                         <Button
                             x:Name="BatchDeleteButton"
-                            Grid.Column="3"
+                            Grid.Column="5"
                             Click="BatchDeleteButton_Click"
                             ToolTipService.ToolTip="{x:Bind Strings.Get('History_BatchDelete_Tooltip'), Mode=OneWay}">
                             <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE74D;" FontSize="14" />
-                                <TextBlock Text="{x:Bind Strings.Get('Common_BatchDelete'), Mode=OneWay}" />
+                                <FontIcon Glyph="&#xE74D;" FontSize="14" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                                <TextBlock Text="{x:Bind Strings.Get('Common_BatchDelete'), Mode=OneWay}" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
                             </StackPanel>
                         </Button>
                     </Grid>
@@ -436,6 +513,20 @@
                                 Text="{x:Bind Strings.Get('History_Detail_Pending'), Mode=OneWay}"
                                 Style="{StaticResource FieldValueTextStyle}" />
                         </Grid>
+
+                        <StackPanel Spacing="6">
+                            <TextBlock
+                                Text="{x:Bind Strings.Get('History_Detail_Label_Note'), Mode=OneWay}"
+                                Style="{StaticResource FieldLabelTextStyle}" />
+                            <TextBox
+                                x:Name="HistoryDetailNoteBox"
+                                PlaceholderText="{x:Bind Strings.Get('History_Note_Placeholder'), Mode=OneWay}"
+                                TextWrapping="Wrap"
+                                AcceptsReturn="True"
+                                MaxHeight="120"
+                                IsSpellCheckEnabled="False"
+                                LostFocus="HistoryDetailNoteBox_LostFocus" />
+                        </StackPanel>
 
                         <Button
                             x:Name="OneClickHistoryQueryButton"
