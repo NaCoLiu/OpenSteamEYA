@@ -11,10 +11,6 @@ internal sealed class SteamLoginService
     private readonly SteamProcessService _steamProcessService = new();
     private readonly SteamLoginCacheService _loginCacheService = new();
     private readonly AccountHistoryService _accountHistoryService = new();
-    // 复用全局单例而非新建实例：SettingsService 用实例级锁串行化 settings.json 读写，
-    // 登录在后台线程读设置，若与设置页保存各持一把独立锁就会与写入竞争（读到默认值→CS2 同步被静默跳过）。
-    private readonly SettingsService _settingsService = AppState.SettingsService;
-    private readonly Cs2CloudService _cs2CloudService = AppState.Cs2CloudService;
 
     public LoginResult Login(string accountName, string eyaToken, IProgress<string>? progress = null)
     {
@@ -126,14 +122,17 @@ internal sealed class SteamLoginService
     {
         try
         {
-            var settings = _settingsService.Load();
+            // 直接用全局单例（而非字段捕获）：AppState.LoginService 是 AppState 静态初始化里第一个 new 的，
+            // 那时 SettingsService/Cs2CloudService 尚未赋值，字段初始化器会捕获到 null；此处在真正登录时才求值，
+            // 静态初始化早已完成。共享单例仍能让 settings.json 读写与设置页保存串行化（实例级锁）。
+            var settings = AppState.SettingsService.Load();
             if (!settings.Cs2SyncOnLogin || string.IsNullOrWhiteSpace(settings.Cs2SyncSourceSteamId))
             {
                 return;
             }
 
             var source = settings.Cs2SyncSourceSteamId;
-            _ = Task.Run(() => _cs2CloudService.PushSourceForLogin(paths, source, targetSteamId, progress));
+            _ = Task.Run(() => AppState.Cs2CloudService.PushSourceForLogin(paths, source, targetSteamId, progress));
         }
         catch (Exception ex)
         {
