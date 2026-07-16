@@ -171,16 +171,20 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
         }
     }
 
-    // 一键个性化：用「个性化」页保存的昵称 + 头像，把当前账号资料设置成这套。
+    // 一键个性化：用「个性化」页保存的昵称 + 简介（真名 / 概要）+ 头像，把当前账号资料设置成这套；
+    // 勾选了「清理曾用名」时在最后清空曾用名记录。
     private async void PersonalizeButton_Click(object sender, RoutedEventArgs e)
     {
         var settings = AppState.SettingsService.Load();
         var personaName = settings.PersonaName;
         var avatarPath = AppState.SettingsService.PersonalizationAvatarPath;
         var hasName = !string.IsNullOrWhiteSpace(personaName);
+        var hasRealName = !string.IsNullOrWhiteSpace(settings.ProfileRealName);
+        var hasSummary = !string.IsNullOrWhiteSpace(settings.ProfileSummary);
         var hasAvatar = File.Exists(avatarPath);
+        var clearAliases = settings.ClearAliasHistoryOnPersonalize;
 
-        if (!hasName && !hasAvatar)
+        if (!hasName && !hasRealName && !hasSummary && !hasAvatar && !clearAliases)
         {
             ShowStatus(Loc.T("Login_Personalize_Empty"), InfoBarSeverity.Warning);
             return;
@@ -199,8 +203,12 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
 
             var result = await AppState.ProfileService.ApplyAsync(
                 eyaToken,
-                hasName ? personaName : null,
-                hasAvatar ? avatarPath : null,
+                new SteamProfileApplyRequest(
+                    hasName ? personaName : null,
+                    hasRealName ? settings.ProfileRealName : null,
+                    hasSummary ? settings.ProfileSummary : null,
+                    hasAvatar ? avatarPath : null,
+                    clearAliases),
                 progress,
                 cancellationToken);
 
@@ -231,14 +239,19 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
             if (!result.IsFullSuccess)
             {
                 var errors = new List<string>();
-                if (result.NameRequested && !result.NameApplied)
+                if (result.ProfileRequested && !result.ProfileApplied)
                 {
-                    errors.Add(result.NameError ?? Loc.T("Profile_Error_Unknown"));
+                    errors.Add(result.ProfileError ?? Loc.T("Profile_Error_Unknown"));
                 }
 
                 if (result.AvatarRequested && !result.AvatarApplied)
                 {
                     errors.Add(result.AvatarError ?? Loc.T("Profile_Error_Unknown"));
+                }
+
+                if (result.AliasClearRequested && !result.AliasesCleared)
+                {
+                    errors.Add(result.AliasClearError ?? Loc.T("Profile_Error_Unknown"));
                 }
 
                 ShowStatus(

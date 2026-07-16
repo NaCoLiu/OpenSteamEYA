@@ -63,7 +63,7 @@ public sealed partial class PersonalizationPage : Page, INotifyPropertyChanged
     private readonly Line[] _grid = new Line[4];       // 三分线
     private readonly Rectangle[] _handles = new Rectangle[8]; // 8 个把手：TL,T,TR,R,BR,B,BL,L
 
-    private bool _loadingNickname;        // 初始填充昵称时屏蔽 TextChanged 回写
+    private bool _loadingSettings;        // 初始填充昵称 / 简介 / 曾用名选项时屏蔽变更回写
     private bool _previewRendering;       // 预览正在异步渲染
     private bool _previewPending;         // 渲染期间又有新取景，渲染完后再来一遍（最新优先）
 
@@ -86,9 +86,13 @@ public sealed partial class PersonalizationPage : Page, INotifyPropertyChanged
     {
         base.OnNavigatedTo(e);
 
-        _loadingNickname = true;
-        NicknameBox.Text = AppState.SettingsService.Load().PersonaName ?? string.Empty;
-        _loadingNickname = false;
+        _loadingSettings = true;
+        var settings = AppState.SettingsService.Load();
+        NicknameBox.Text = settings.PersonaName ?? string.Empty;
+        RealNameBox.Text = settings.ProfileRealName ?? string.Empty;
+        SummaryBox.Text = settings.ProfileSummary ?? string.Empty;
+        ClearAliasCheckBox.IsChecked = settings.ClearAliasHistoryOnPersonalize;
+        _loadingSettings = false;
         UpdateNicknameCounter();
 
         // 首次进入时若已有保存的头像，载入裁剪区作为可继续微调的源图。
@@ -108,19 +112,38 @@ public sealed partial class PersonalizationPage : Page, INotifyPropertyChanged
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Strings))));
     }
 
-    // ---- 昵称 ----
+    // ---- 昵称 / 简介 / 曾用名选项（随输入即时落盘） ----
 
     private void NicknameBox_TextChanged(object sender, TextChangedEventArgs e)
     {
         UpdateNicknameCounter();
+        SaveSettings(settings => settings.PersonaName = NicknameBox.Text);
+    }
 
-        if (_loadingNickname)
+    private void RealNameBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        SaveSettings(settings => settings.ProfileRealName = RealNameBox.Text);
+    }
+
+    private void SummaryBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        SaveSettings(settings => settings.ProfileSummary = SummaryBox.Text);
+    }
+
+    private void ClearAliasCheckBox_Toggled(object sender, RoutedEventArgs e)
+    {
+        SaveSettings(settings => settings.ClearAliasHistoryOnPersonalize = ClearAliasCheckBox.IsChecked == true);
+    }
+
+    private void SaveSettings(Action<AppSettings> apply)
+    {
+        if (_loadingSettings)
         {
             return;
         }
 
         var settings = AppState.SettingsService.Load();
-        settings.PersonaName = NicknameBox.Text;
+        apply(settings);
         AppState.SettingsService.Save(settings);
     }
 

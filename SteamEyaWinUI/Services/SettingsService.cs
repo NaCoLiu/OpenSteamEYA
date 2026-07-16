@@ -107,6 +107,15 @@ internal sealed class AppSettings
     /// <summary>「个性化」面板里设置的昵称，供登录页一键把账号资料设为该值。null/空表示不改昵称。</summary>
     public string? PersonaName { get; set; }
 
+    /// <summary>「个性化」面板里设置的真实姓名（资料页 real_name 字段）。null/空表示不改。</summary>
+    public string? ProfileRealName { get; set; }
+
+    /// <summary>「个性化」面板里设置的概要（资料页 summary 字段，可多行）。null/空表示不改。</summary>
+    public string? ProfileSummary { get; set; }
+
+    /// <summary>是否在「一键个性化」完成后清空账号的曾用名记录。</summary>
+    public bool ClearAliasHistoryOnPersonalize { get; set; }
+
     /// <summary>用户自定义账号分组定义（名称/排序）。成员关系存于各账号的 GroupIds，此处只存定义。</summary>
     public List<AccountGroup> Groups { get; set; } = [];
 
