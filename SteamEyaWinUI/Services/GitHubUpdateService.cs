@@ -8,10 +8,10 @@ namespace SteamEyaWinUI.Services;
 
 internal sealed class GitHubUpdateService
 {
-    public const string RepositoryUrl = "https://github.com/NaCoLiu/OpenSteamEYA";
+    public const string RepositoryUrl = "https://github.com/hvh-software/OpenSteamEYA/";
     public const string ReleasesUrl = $"{RepositoryUrl}/releases";
 
-    private const string LatestReleaseApiUrl = "https://api.github.com/repos/NaCoLiu/OpenSteamEYA/releases/latest";
+    private const string LatestReleaseApiUrl = "https://api.github.com/repos/hvh-software/OpenSteamEYA/releases/latest";
 
     private static readonly HttpClient HttpClient = CreateHttpClient();
 
