@@ -9,6 +9,7 @@ internal sealed record GitHubUpdateInfo(
     string? ArtifactName,
     string? ArtifactUrl,
     long? ArtifactSize,
+    string? ArtifactType,
     string? ArtifactSha256,
     IReadOnlyList<string> Changelog,
     DateTimeOffset CheckedAt);

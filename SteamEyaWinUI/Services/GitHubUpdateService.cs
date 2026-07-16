@@ -8,10 +8,10 @@ namespace SteamEyaWinUI.Services;
 
 internal sealed class GitHubUpdateService
 {
-    public const string RepositoryUrl = "https://github.com/hvh-software/OpenSteamEYA";
+    public const string RepositoryUrl = "https://github.com/NaCoLiu/OpenSteamEYA";
     public const string ReleasesUrl = $"{RepositoryUrl}/releases";
 
-    private const string LatestReleaseApiUrl = "https://api.github.com/repos/hvh-software/OpenSteamEYA/releases/latest";
+    private const string LatestReleaseApiUrl = "https://api.github.com/repos/NaCoLiu/OpenSteamEYA/releases/latest";
 
     private static readonly HttpClient HttpClient = CreateHttpClient();
 
@@ -61,6 +61,7 @@ internal sealed class GitHubUpdateService
             artifact?.Name ?? metadata?.ArtifactName,
             artifact?.BrowserDownloadUrl,
             artifact?.Size ?? metadata?.ArtifactSize,
+            metadata?.ArtifactType,
             metadata?.ArtifactSha256,
             changelog,
             DateTimeOffset.Now);
@@ -82,6 +83,14 @@ internal sealed class GitHubUpdateService
         IReadOnlyList<GitHubReleaseAssetDto> assets,
         string? artifactName)
     {
+        // 只要 release 里有安装器，始终优先它，避免旧 latest.json 仍指向 7z 时被“精确命中”抢走。
+        var installer = assets.FirstOrDefault(asset =>
+            asset.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
+        if (installer is not null)
+        {
+            return installer;
+        }
+
         if (!string.IsNullOrWhiteSpace(artifactName))
         {
             var exact = assets.FirstOrDefault(asset =>
@@ -93,8 +102,7 @@ internal sealed class GitHubUpdateService
         }
 
         return assets.FirstOrDefault(asset =>
-            asset.Name.EndsWith(".7z", StringComparison.OrdinalIgnoreCase) ||
-            asset.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
+                asset.Name.EndsWith(".7z", StringComparison.OrdinalIgnoreCase));
     }
 
     private static string GetCurrentVersion()
@@ -177,6 +185,7 @@ internal sealed class GitHubUpdateService
         string? Tag,
         string? ArtifactName,
         long? ArtifactSize,
+        string? ArtifactType,
         string? ArtifactSha256,
         IReadOnlyList<string>? Changelog);
 }

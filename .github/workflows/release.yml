@@ -2,8 +2,18 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without leading v (example: 0.1.42)"
+        required: false
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -30,8 +40,28 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
 
-          $version = "0.1.${{ github.run_number }}"
-          $tag = "v$version"
+          $eventName = "${{ github.event_name }}"
+          $refType = "${{ github.ref_type }}"
+          $refName = "${{ github.ref_name }}"
+          $inputVersion = "${{ github.event.inputs.version }}"
+
+          if ($eventName -eq "push" -and $refType -eq "tag" -and $refName.StartsWith("v")) {
+            $tag = $refName
+            $version = $refName.Substring(1)
+          }
+          elseif (-not [string]::IsNullOrWhiteSpace($inputVersion)) {
+            $version = $inputVersion.Trim()
+            if ($version.StartsWith("v")) {
+              $version = $version.Substring(1)
+            }
+
+            $tag = "v$version"
+          }
+          else {
+            $version = "0.1.${{ github.run_number }}"
+            $tag = "v$version"
+          }
+
           $shortSha = "${{ github.sha }}".Substring(0, 7)
           $previousTag = git tag --list "v*" --sort=-v:refname | Select-Object -First 1
 
@@ -62,8 +92,8 @@ jobs:
             ""
             "## 运行依赖"
             "- Windows 10 1809 / Windows 11，x64。"
-            "- 7-Zip 或 NanaZip，用于解压 ``.7z`` 发布包。"
-            "- 无需安装任何运行时：Native AOT 原生编译 + Windows App SDK 自包含，解压即用。"
+            "- 无需安装任何运行时：Native AOT 原生编译 + Windows App SDK 自包含。"
+            "- 推荐直接下载并运行安装包（Setup.exe）。"
           ) | Set-Content -LiteralPath $notesPath -Encoding UTF8
 
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -88,37 +118,51 @@ jobs:
           -p:AssemblyVersion=${{ steps.meta.outputs.version }}.0
           -p:InformationalVersion=${{ steps.meta.outputs.tag }}+${{ github.sha }}
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+
       - name: Package
         id: package
         shell: pwsh
         run: |
-          $artifactName = "SteamEYA-${{ steps.meta.outputs.version }}-win-x64.7z"
+          $artifactName = "SteamEYA-${{ steps.meta.outputs.version }}-win-x64-setup.exe"
           $artifactPath = Join-Path $PWD "artifacts\$artifactName"
           $metadataPath = Join-Path $PWD "artifacts\latest.json"
-          $packageDir = Join-Path $PWD "artifacts\build\win-x64"
+          $publishDir = Join-Path $PWD "artifacts\build\win-x64"
 
           # Native AOT 产物：exe 内含全部托管代码，剔除符号与未使用的 WebView2 组件。
-          Get-ChildItem -LiteralPath $packageDir -Filter "*.pdb" -File | Remove-Item -Force
+          Get-ChildItem -LiteralPath $publishDir -Filter "*.pdb" -File | Remove-Item -Force
           foreach ($pattern in @(
             "Microsoft.Web.WebView2.Core*.dll",
             "WebView2Loader.dll"
           )) {
-            Get-ChildItem -LiteralPath $packageDir -Filter $pattern -File | Remove-Item -Force
+            Get-ChildItem -LiteralPath $publishDir -Filter $pattern -File | Remove-Item -Force
           }
 
-          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
-          if (-not $sevenZip) {
-            $sevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            foreach ($candidate in @(
+              (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe"),
+              (Join-Path $env:ProgramFiles "Inno Setup 7\ISCC.exe")
+            )) {
+              if (Test-Path -LiteralPath $candidate) {
+                $iscc = $candidate
+                break
+              }
+            }
           }
-          if (-not (Test-Path -LiteralPath $sevenZip)) {
-            throw "7-Zip was not found on the runner."
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            throw "Inno Setup compiler (ISCC.exe) was not found on the runner."
           }
 
-          & $sevenZip a -t7z -mx=9 -mmt=on $artifactPath "$packageDir\*"
+          & $iscc "/DAppVersion=${{ steps.meta.outputs.version }}" "/DPublishDir=$publishDir" "/DOutputDir=$(Join-Path $PWD 'artifacts')" ".\build\installer\SteamEYA.iss"
+
           $artifact = Get-Item -LiteralPath $artifactPath
-          # 自包含发布含 Windows App SDK 运行时 DLL，约 15 MB；25 MB 上限用于及早发现意外膨胀。
-          if ($artifact.Length -gt 25MB) {
-            throw "Release artifact is $([math]::Round($artifact.Length / 1MB, 2)) MB, larger than the 25 MB limit."
+          # 自包含安装包通常在 25 MB 左右，40 MB 上限用于及早发现意外膨胀。
+          if ($artifact.Length -gt 40MB) {
+            throw "Release artifact is $([math]::Round($artifact.Length / 1MB, 2)) MB, larger than the 40 MB limit."
           }
 
           $sha256 = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -132,7 +176,7 @@ jobs:
             artifactName = $artifactName
             artifactSize = $artifact.Length
             artifactSha256 = $sha256
-            artifactType = "7z-archive"
+            artifactType = "exe-installer"
             changelog = $changelog
           }
           $metadata | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $metadataPath -Encoding UTF8
@@ -148,9 +192,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release create "${{ steps.meta.outputs.tag }}" `
-            "${{ steps.package.outputs.artifact_path }}" `
-            "${{ steps.package.outputs.metadata_path }}" `
-            --target "${{ github.sha }}" `
-            --title "SteamEYA ${{ steps.meta.outputs.tag }}" `
-            --notes-file "${{ steps.meta.outputs.notes_path }}"
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $title = "SteamEYA $tag"
+          $target = "${{ github.sha }}"
+          $notes = "${{ steps.meta.outputs.notes_path }}"
+          $artifact = "${{ steps.package.outputs.artifact_path }}"
+          $metadata = "${{ steps.package.outputs.metadata_path }}"
+
+          if (gh release view $tag --json tagName | Out-Null) {
+            gh release upload $tag $artifact --clobber
+            gh release upload $tag $metadata --clobber
+            gh release edit $tag --title $title --notes-file $notes --target $target
+          }
+          else {
+            gh release create $tag $artifact $metadata --target $target --title $title --notes-file $notes
+          }
