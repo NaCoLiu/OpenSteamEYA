@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -11,6 +12,9 @@ namespace SteamEyaWinUI.Pages;
 public sealed partial class AboutPage : Page, INotifyPropertyChanged
 {
     private readonly DispatcherQueue _dispatcherQueue = DispatcherQueue.GetForCurrentThread();
+    private bool _isDownloadingUpdate;
+    private long _downloadBytesReceived;
+    private long? _downloadTotalBytes;
 
     public AboutPage()
     {
@@ -52,14 +56,92 @@ public sealed partial class AboutPage : Page, INotifyPropertyChanged
 
     private async void DownloadUpdateButton_Click(object sender, RoutedEventArgs e)
     {
-        var url = AppState.LatestUpdate?.ArtifactUrl ?? AppState.LatestUpdate?.ReleaseUrl;
-        if (string.IsNullOrWhiteSpace(url))
+        var update = AppState.LatestUpdate;
+        var url = update?.ArtifactUrl ?? update?.ReleaseUrl;
+        if (update is null || string.IsNullOrWhiteSpace(url))
         {
             AppState.ShowStatus(Loc.T("About_NoDownloadInfo"), InfoBarSeverity.Warning);
             return;
         }
 
-        await AppState.OpenUrlAsync(url);
+        if (!update.IsUpdateAvailable)
+        {
+            AppState.ShowStatus(Loc.Tf("About_Update_UpToDate_Format", update.LatestTag), InfoBarSeverity.Success);
+            return;
+        }
+
+        if (_isDownloadingUpdate)
+        {
+            return;
+        }
+
+        // 若最新产物不是安装器，退化为打开发布页。
+        if (!url.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(update.ArtifactType, "exe-installer", StringComparison.OrdinalIgnoreCase))
+        {
+            await AppState.OpenUrlAsync(url);
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = Loc.T("About_UpdateInstallConfirm_Title"),
+            Content = Loc.Tf("About_UpdateInstallConfirm_Content_Format", update.LatestTag),
+            PrimaryButtonText = Loc.T("About_UpdateInstallConfirm_Install"),
+            CloseButtonText = Loc.T("Common_Cancel"),
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = XamlRoot
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        _isDownloadingUpdate = true;
+        _downloadBytesReceived = 0;
+        _downloadTotalBytes = null;
+        Render();
+
+        try
+        {
+            AppState.ShowStatus(Loc.T("About_Update_Downloading"), InfoBarSeverity.Informational);
+
+            var progress = new Progress<UpdateDownloadProgress>(p =>
+            {
+                _downloadBytesReceived = p.BytesReceived;
+                _downloadTotalBytes = p.TotalBytes;
+                Render();
+            });
+
+            var installerPath = await AppState.UpdateInstallerService.DownloadInstallerAsync(update, progress);
+            AppState.ShowStatus(Loc.T("About_Update_Downloaded"), InfoBarSeverity.Success);
+
+            if (!AppState.UpdateInstallerService.LaunchInstaller(installerPath))
+            {
+                AppState.ShowStatus(Loc.T("About_Update_InstallerLaunchFailed"), InfoBarSeverity.Error);
+                return;
+            }
+
+            AppState.ShowStatus(Loc.T("About_Update_InstallerLaunched"), InfoBarSeverity.Warning);
+
+            // 安装器已启动：先清掉残留实例，再强制结束当前进程，避免文件占用导致安装失败。
+            var current = Process.GetCurrentProcess();
+            AppState.UpdateInstallerService.ForceCloseOtherInstances(current.ProcessName, current.Id);
+            current.Kill(entireProcessTree: true);
+        }
+        catch (Exception ex)
+        {
+            AppState.ShowStatus(Loc.Tf("About_Update_DownloadFailed_Format", ex.Message), InfoBarSeverity.Error);
+        }
+        finally
+        {
+            _isDownloadingUpdate = false;
+            _downloadBytesReceived = 0;
+            _downloadTotalBytes = null;
+            Render();
+        }
     }
 
     private async void OpenReleaseButton_Click(object sender, RoutedEventArgs e)
@@ -79,8 +161,32 @@ public sealed partial class AboutPage : Page, INotifyPropertyChanged
 
         UpdateCheckingRing.IsActive = isChecking;
         UpdateCheckingRing.Visibility = isChecking ? Visibility.Visible : Visibility.Collapsed;
-        CheckUpdateButton.IsEnabled = !isChecking;
-        DownloadUpdateButton.IsEnabled = !isChecking && !string.IsNullOrWhiteSpace(update?.ArtifactUrl);
+        CheckUpdateButton.IsEnabled = !isChecking && !_isDownloadingUpdate;
+        DownloadUpdateButton.IsEnabled = !isChecking &&
+            !_isDownloadingUpdate &&
+            update is { IsUpdateAvailable: true } &&
+            !string.IsNullOrWhiteSpace(update.ArtifactUrl);
+
+        UpdateDownloadProgressPanel.Visibility = _isDownloadingUpdate ? Visibility.Visible : Visibility.Collapsed;
+        if (_isDownloadingUpdate)
+        {
+            if (_downloadTotalBytes is > 0)
+            {
+                var percent = Math.Clamp(_downloadBytesReceived * 100d / _downloadTotalBytes.Value, 0d, 100d);
+                UpdateDownloadProgressBar.IsIndeterminate = false;
+                UpdateDownloadProgressBar.Value = percent;
+                UpdateDownloadProgressText.Text = Loc.Tf(
+                    "About_Update_DownloadProgress_Format",
+                    percent.ToString("F1"),
+                    FormatHelper.FormatFileSize(_downloadBytesReceived),
+                    FormatHelper.FormatFileSize(_downloadTotalBytes.Value));
+            }
+            else
+            {
+                UpdateDownloadProgressBar.IsIndeterminate = true;
+                UpdateDownloadProgressText.Text = Loc.T("About_Update_DownloadProgress_Unknown");
+            }
+        }
 
         AboutVersionText.Text = Loc.Tf("About_Version_Format", update?.CurrentVersion ?? GitHubUpdateService.CurrentVersion);
 

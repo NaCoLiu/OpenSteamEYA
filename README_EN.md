@@ -53,7 +53,7 @@ Cancel all Workshop subscriptions for the current account under CS2 (AppID 730) 
 
 **Automatic Updates**
 
-SteamEYA checks GitHub Releases on startup. If a newer version is available, the About page will show a tips and the download link.
+SteamEYA checks GitHub Releases on startup. If a newer version is available, you can download and launch the installer directly from the About page.
 
 **Multi-language UI**
 
@@ -61,17 +61,17 @@ Ships with Simplified Chinese, Traditional Chinese, and English. Switch anytime 
 
 ## Installation
 
-1. Download the latest `SteamEYA-<version>-win-x64.7z` from [Releases](https://github.com/hvh-software/OpenSteamEYA/releases).
-2. Use [7-Zip](https://www.7-zip.org/) or NanaZip to **fully extract** the archive to a folder.
-3. Double-click `SteamEyaWinUI.exe` to run.
+1. Download the latest `SteamEYA-<version>-win-x64-setup.exe` from [Releases](https://github.com/hvh-software/OpenSteamEYA/releases).
+2. Run the installer and finish the setup wizard.
+3. Launch SteamEYA from Start Menu or Desktop shortcut.
 
 Requirements: Windows 10 1809 (Build 17763) or later, with the Steam client installed. No additional runtime installation is required.
 
 ## FAQ
 
-**Nothing happens when I double-click the exe. What should I do?**
+**The installer cannot be launched. What should I do?**
 
-Make sure the archive has been **fully extracted** to a folder. Do not run the program directly inside the compressed archive, because the runtime files must be in the same directory as the exe.
+Check whether your security software blocks it, then re-download the latest installer from [Releases](https://github.com/hvh-software/OpenSteamEYA/releases) and try again.
 
 **What is an EYA token?**
 
@@ -89,6 +89,12 @@ You need to fully exit the running Steam client before logging in. If Steam is r
 git clone https://github.com/hvh-software/OpenSteamEYA.git
 cd OpenSteamEYA
 dotnet build SteamEyaWinUI/SteamEyaWinUI.csproj -c Release
+```
+
+Build installer (Inno Setup 6 required):
+
+```powershell
+./scripts/build-installer.ps1 -Version 0.1.0
 ```
 
 ## 🤝 Contributing

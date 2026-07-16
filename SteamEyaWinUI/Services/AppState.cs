@@ -21,6 +21,7 @@ internal static class AppState
     public static SteamProfileService ProfileService { get; } = new();
     public static SteamCredentialsAuthService CredentialsAuthService { get; } = new();
     public static GitHubUpdateService UpdateService { get; } = new();
+    public static UpdateInstallerService UpdateInstallerService { get; } = new();
     public static SettingsService SettingsService { get; } = new();
     public static Cs2CloudService Cs2CloudService { get; } = new();
 
