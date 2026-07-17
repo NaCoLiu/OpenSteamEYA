@@ -44,6 +44,10 @@ internal sealed class SettingsService
                     {
                         // JSON 里显式的 "groups": null 会覆盖属性初始值，消费方（LoadGroups 等）直接 .Groups 会 NRE。
                         settings.Groups ??= [];
+                        // 同理防护配装预设：显式 null 会让配装页导航、一键配装直接 NRE。
+                        settings.Loadout ??= CsLoadoutPreset.Default();
+                        settings.Loadout.T ??= new Dictionary<uint, uint>();
+                        settings.Loadout.Ct ??= new Dictionary<uint, uint>();
                         return settings;
                     }
                 }
@@ -61,13 +65,13 @@ internal sealed class SettingsService
     {
         lock (_gate)
         {
+            // 先写临时文件再原子替换，避免写入中断留下半截 settings.json。
+            var tempPath = _settingsFilePath + "." + Path.GetRandomFileName() + ".tmp";
             try
             {
                 Directory.CreateDirectory(AppFolderPath);
                 var json = JsonSerializer.Serialize(settings, AppSettingsJsonContext.Default.AppSettings);
 
-                // 先写临时文件再原子替换，避免写入中断留下半截 settings.json。
-                var tempPath = _settingsFilePath + "." + Path.GetRandomFileName() + ".tmp";
                 File.WriteAllText(tempPath, json);
                 if (File.Exists(_settingsFilePath))
                 {
@@ -81,6 +85,14 @@ internal sealed class SettingsService
             catch (Exception ex)
             {
                 AppLog.Error("保存应用设置失败。", ex);
+                try
+                {
+                    File.Delete(tempPath);
+                }
+                catch
+                {
+                    // 清理残留临时文件失败无需上报。
+                }
             }
         }
     }

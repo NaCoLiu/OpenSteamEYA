@@ -124,7 +124,7 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
 
         try
         {
-            var (accountName, eyaToken) = await GetCredentialsAsync();
+            var (accountName, eyaToken) = await GetCredentialsAsync(cancellationToken);
             EnsureTokenValidForAction(eyaToken, "Login_Action_ApplyLoadout");
             UpdateAccountInfo(accountName, eyaToken);
             await UpdateAccountProfileAsync(accountName, eyaToken);
@@ -197,7 +197,7 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
 
         try
         {
-            var (accountName, eyaToken) = await GetCredentialsAsync();
+            var (accountName, eyaToken) = await GetCredentialsAsync(cancellationToken);
             EnsureTokenValidForAction(eyaToken, "Login_Action_Personalize");
             UpdateAccountInfo(accountName, eyaToken);
 
@@ -387,7 +387,7 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
 
         try
         {
-            var (accountName, eyaToken) = await GetCredentialsAsync();
+            var (accountName, eyaToken) = await GetCredentialsAsync(cancellationToken);
             EnsureTokenValidForAction(eyaToken, "Login_Action_ClearWorkshop");
             UpdateAccountInfo(accountName, eyaToken);
             await UpdateAccountProfileAsync(accountName, eyaToken);
@@ -441,7 +441,7 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
 
         try
         {
-            var (accountName, eyaToken) = await GetCredentialsAsync();
+            var (accountName, eyaToken) = await GetCredentialsAsync(cancellationToken);
             EnsureTokenValidForAction(eyaToken, "Login_Action_Login");
             UpdateAccountInfo(accountName, eyaToken);
             // 这一次抓取的 persona/头像直接传给 SaveLoginAsync，避免历史保存时重复抓取一遍。
@@ -513,18 +513,25 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
 
     private async Task ResolveLicenseInteractiveAsync()
     {
-        AppState.SetBusy(true);
+        // 走 BeginBusyOperation 而非裸 SetBusy：忙碌时出现的取消按钮才有真正可取消的 CTS。
+        var cancellationToken = AppState.BeginBusyOperation();
         ShowStatus(Loc.T("Login_Status_ResolvingLicense"), InfoBarSeverity.Informational);
 
         try
         {
-            var account = await ResolveLicenseAsync();
-            var online = await ValidateTokenOnlineAsync(account.Token);
+            var account = await ResolveLicenseAsync(cancellationToken);
+            var online = await ValidateTokenOnlineAsync(account.Token, cancellationToken);
             ShowStatus(
                 online.IsValid
                     ? Loc.Tf("Login_Status_LicenseResolved_Format", account.User, account.SteamId)
                     : online.Status,
                 online.IsValid ? InfoBarSeverity.Success : InfoBarSeverity.Error);
+        }
+        // 仅在用户真的按了取消时报「已取消」；HTTP 超时抛的 TaskCanceledException（此 token 未取消）
+        // 落到下面的通用错误分支，避免把「服务器不可达超时」误报成用户取消。
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            ShowStatus(Loc.T("Login_Status_LicenseResolveCancelled"), InfoBarSeverity.Informational);
         }
         catch (Exception ex)
         {
@@ -532,7 +539,7 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
         }
         finally
         {
-            AppState.SetBusy(false);
+            AppState.EndBusyOperation();
         }
     }
 
@@ -543,7 +550,7 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
 
         try
         {
-            var (accountName, eyaToken) = await GetCredentialsAsync();
+            var (accountName, eyaToken) = await GetCredentialsAsync(cancellationToken);
             var score = await QueryAndSaveCsStatusAsync(accountName, eyaToken, cancellationToken);
             ShowStatus(
                 Loc.Tf("Login_Status_QueryDone_Format", score.DisplayText, score.PlayerLevelText, score.CooldownText, score.GcVacText),
@@ -664,11 +671,11 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
         }
     }
 
-    private async Task<(string AccountName, string EyaToken)> GetCredentialsAsync()
+    private async Task<(string AccountName, string EyaToken)> GetCredentialsAsync(CancellationToken cancellationToken = default)
     {
         if (IsAutoMode)
         {
-            var account = await ResolveLicenseAsync();
+            var account = await ResolveLicenseAsync(cancellationToken);
             return (account.User, FormatHelper.NormalizeToken(account.Token));
         }
 
@@ -688,7 +695,7 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
         return (accountName, eyaToken);
     }
 
-    private async Task<SteamAccountData> ResolveLicenseAsync()
+    private async Task<SteamAccountData> ResolveLicenseAsync(CancellationToken cancellationToken = default)
     {
         var licenseKey = LicenseKeyBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(licenseKey))
@@ -704,7 +711,7 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
             return _cachedAccountData;
         }
 
-        var account = await AppState.LicenseClient.GetAccountDataAsync(licenseKey, server);
+        var account = await AppState.LicenseClient.GetAccountDataAsync(licenseKey, server, cancellationToken);
         _cachedAccountData = account;
         _cachedLicenseKey = licenseKey;
         _cachedServer = server;
@@ -1088,18 +1095,25 @@ public sealed partial class LoginPage : Page, INotifyPropertyChanged
             Loc.Tf("Login_Error_StatusCannotAction_Format", online.Status, Loc.T(actionName)));
     }
 
-    private async Task<SteamTokenOnlineValidationResult> ValidateTokenOnlineAsync(string eyaToken)
+    private async Task<SteamTokenOnlineValidationResult> ValidateTokenOnlineAsync(
+        string eyaToken,
+        CancellationToken cancellationToken = default)
     {
         AccountInfoAvailabilityText.Text = Loc.T("Login_Availability_Verifying");
         AccountInfoAvailabilityText.Foreground = FormatHelper.GetStatusBrush(InfoBarSeverity.Informational);
 
         try
         {
-            var result = await AppState.TokenOnlineValidationService.ValidateAsync(eyaToken);
+            var result = await AppState.TokenOnlineValidationService.ValidateAsync(eyaToken, cancellationToken);
             AccountInfoAvailabilityText.Text = result.IsValid ? Loc.T("Login_Availability_Valid") : Loc.T("Login_Availability_Invalid");
             AccountInfoAvailabilityText.Foreground = FormatHelper.GetStatusBrush(
                 result.IsValid ? InfoBarSeverity.Success : InfoBarSeverity.Error);
             return result;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 用户主动取消：向上抛给 ResolveLicenseInteractiveAsync 统一按「已取消」处理。
+            throw;
         }
         catch (Exception ex)
         {

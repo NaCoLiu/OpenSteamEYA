@@ -72,27 +72,52 @@ internal static class CsSoCacheParser
         return false;
     }
 
-    public static List<CsLoadoutEntry> ParseLoadoutFromGcMessage(
+    // 把一条 GC SO 消息按序落到 loadout 槽位状态上：新增/修改 → 写入，销毁/移除 → 删除键。
+    // SODestroy 与 CMsgSOMultipleObjects.objects_removed（field 5）表示「槽位条目被 GC 删除」，
+    // 实测发生在槽位回到游戏内置默认武器时；把它们当作已装备条目合并会让校验拿到陈旧值。
+    public static void ApplyLoadoutSoMessage(
+        IDictionary<(uint ClassId, uint SlotId), uint> state,
         uint msgType,
         byte[] payload,
         uint accountId)
     {
         try
         {
-            return msgType switch
+            var upserts = new List<CsLoadoutEntry>();
+            var removals = new List<(uint ClassId, uint SlotId)>();
+
+            switch (msgType)
             {
-                CsLoadoutConstants.SoCacheSubscribed =>
-                    ParseLoadoutFromSoCacheSubscribed(payload, accountId),
-                CsLoadoutConstants.SoUpdateMultiple =>
-                    ParseLoadoutFromSoMultipleObjects(payload, accountId),
-                CsLoadoutConstants.SoUpdate or CsLoadoutConstants.SoCreate =>
-                    ParseLoadoutFromSingleObject(payload, accountId),
-                _ => []
-            };
+                case CsLoadoutConstants.SoCacheSubscribed:
+                    ParseSoCacheSubscribed(payload, accountId, upserts);
+                    break;
+
+                case CsLoadoutConstants.SoUpdateMultiple:
+                    ParseSoMultipleObjects(payload, accountId, upserts, removals);
+                    break;
+
+                case CsLoadoutConstants.SoUpdate or CsLoadoutConstants.SoCreate:
+                    TryAddLoadoutEntryFromSingleObject(payload, accountId, upserts);
+                    break;
+
+                case CsLoadoutConstants.SoDestroy:
+                    ParseRemovalFromSingleObject(payload, accountId, removals);
+                    break;
+            }
+
+            foreach (var entry in upserts)
+            {
+                state[(entry.ClassId, entry.SlotId)] = entry.ItemDefinition;
+            }
+
+            foreach (var key in removals)
+            {
+                state.Remove(key);
+            }
         }
         catch
         {
-            return [];
+            // 单条消息解析失败不应中断整体合并。
         }
     }
 
@@ -100,24 +125,8 @@ internal static class CsSoCacheParser
         msgType is CsLoadoutConstants.SoCacheSubscribed
             or CsLoadoutConstants.SoUpdateMultiple
             or CsLoadoutConstants.SoUpdate
-            or CsLoadoutConstants.SoCreate;
-
-    public static void MergeEntries(
-        IDictionary<(uint ClassId, uint SlotId), CsLoadoutEntry> target,
-        IEnumerable<CsLoadoutEntry> source)
-    {
-        foreach (var entry in source)
-        {
-            target[(entry.ClassId, entry.SlotId)] = entry;
-        }
-    }
-
-    private static List<CsLoadoutEntry> ParseLoadoutFromSoCacheSubscribed(byte[] payload, uint accountId)
-    {
-        var entries = new List<CsLoadoutEntry>();
-        ParseSoCacheSubscribed(payload, accountId, entries);
-        return entries;
-    }
+            or CsLoadoutConstants.SoCreate
+            or CsLoadoutConstants.SoDestroy;
 
     private static bool TryGetOwnerSoidFromCacheSubscribed(byte[] body, out uint ownerType, out ulong ownerId)
     {
@@ -186,26 +195,27 @@ internal static class CsSoCacheParser
         return ownerType != 0 && ownerId != 0;
     }
 
-    private static List<CsLoadoutEntry> ParseLoadoutFromSoMultipleObjects(byte[] body, uint accountId)
+    private static void ParseSoMultipleObjects(
+        byte[] body,
+        uint accountId,
+        List<CsLoadoutEntry> upserts,
+        List<(uint ClassId, uint SlotId)> removals)
     {
-        var entries = new List<CsLoadoutEntry>();
         var reader = new SteamProtoReader(body);
 
         while (reader.TryReadTag(out var field, out var wireType))
         {
-            // CMsgSOMultipleObjects: objects_modified=2, version=3 (fixed64).
-            if (field is 2 or 4 or 5)
+            // CMsgSOMultipleObjects: objects_modified=2, objects_added=4, objects_removed=5, version=3 (fixed64)。
+            if (field is 2 or 4 or 5 && wireType == 2)
             {
-                if (wireType == 2)
+                var obj = reader.ReadLengthDelimited(wireType);
+                if (field == 5)
                 {
-                    TryAddLoadoutEntryFromMultipleObject(
-                        reader.ReadLengthDelimited(wireType),
-                        accountId,
-                        entries);
+                    TryAddRemovalFromObject(obj, accountId, removals, typeIdField: 1, objectDataField: 2);
                 }
                 else
                 {
-                    reader.Skip(wireType);
+                    TryAddLoadoutEntryFromMultipleObject(obj, accountId, upserts);
                 }
             }
             else
@@ -213,15 +223,124 @@ internal static class CsSoCacheParser
                 reader.Skip(wireType);
             }
         }
-
-        return entries;
     }
 
-    private static List<CsLoadoutEntry> ParseLoadoutFromSingleObject(byte[] body, uint accountId)
+    // CMsgSOSingleObject（SODestroy）: type_id=2, object_data=3。销毁对象只携带键字段。
+    private static void ParseRemovalFromSingleObject(
+        byte[] body,
+        uint accountId,
+        List<(uint ClassId, uint SlotId)> removals)
     {
-        var entries = new List<CsLoadoutEntry>();
-        TryAddLoadoutEntryFromSingleObject(body, accountId, entries);
-        return entries;
+        TryAddRemovalFromObject(body, accountId, removals, typeIdField: 2, objectDataField: 3);
+    }
+
+    private static void TryAddRemovalFromObject(
+        byte[] body,
+        uint accountId,
+        List<(uint ClassId, uint SlotId)> removals,
+        int typeIdField,
+        int objectDataField)
+    {
+        var typeId = 0;
+        byte[]? objectData = null;
+        var reader = new SteamProtoReader(body);
+
+        while (reader.TryReadTag(out var field, out var wireType))
+        {
+            if (field == typeIdField && wireType == 0)
+            {
+                typeId = (int)reader.ReadVarint(wireType);
+            }
+            else if (field == objectDataField && wireType == 2)
+            {
+                objectData = reader.ReadLengthDelimited(wireType);
+            }
+            else
+            {
+                reader.Skip(wireType);
+            }
+        }
+
+        if (objectData is null || objectData.Length == 0)
+        {
+            return;
+        }
+
+        uint classId;
+        uint slotId;
+        switch (typeId)
+        {
+            case CsLoadoutConstants.SoTypeEquipSlot:
+            {
+                if (!TryDecodeEquipSlot(objectData, out var slot) ||
+                    (slot.AccountId != 0 && slot.AccountId != accountId))
+                {
+                    return;
+                }
+
+                classId = slot.ClassId;
+                slotId = slot.SlotId;
+                break;
+            }
+
+            case CsLoadoutConstants.SoTypeDefaultEquippedDefinition:
+            {
+                // 销毁对象可能不带 item_definition，不能复用要求 def 非零的完整解码。
+                if (!TryDecodeDefaultEquippedKey(objectData, out var acct, out classId, out slotId) ||
+                    (acct != 0 && acct != accountId))
+                {
+                    return;
+                }
+
+                break;
+            }
+
+            default:
+                return;
+        }
+
+        if (classId is not (CsLoadoutConstants.TeamTerrorist or CsLoadoutConstants.TeamCounterTerrorist))
+        {
+            return;
+        }
+
+        removals.Add((classId, slotId));
+    }
+
+    private static bool TryDecodeDefaultEquippedKey(
+        byte[] body,
+        out uint accountId,
+        out uint classId,
+        out uint slotId)
+    {
+        accountId = 0;
+        classId = 0;
+        slotId = 0;
+        var reader = new SteamProtoReader(body);
+
+        while (reader.TryReadTag(out var field, out var wireType))
+        {
+            switch (field)
+            {
+                case 1:
+                    accountId = (uint)reader.ReadVarint(wireType);
+                    break;
+
+                case 3:
+                    classId = (uint)reader.ReadVarint(wireType);
+                    break;
+
+                case 4:
+                    slotId = (uint)reader.ReadVarint(wireType);
+                    break;
+
+                default:
+                    reader.Skip(wireType);
+                    break;
+            }
+        }
+
+        return classId != 0 && slotId != 0;
     }
 
     private static void TryAddLoadoutEntryFromMultipleObject(
