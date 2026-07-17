@@ -12,22 +12,39 @@ using Microsoft.UI.Xaml.Shapes;
 using SteamEyaWinUI.Localization;
 using SteamEyaWinUI.Models;
 using SteamEyaWinUI.Services;
-using Windows.ApplicationModel.DataTransfer;
+using Windows.Foundation;
 
 namespace SteamEyaWinUI.Pages;
 
 public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
 {
+    private const double DragThresholdPixels = 8;
+
     private readonly DispatcherQueue _dispatcherQueue = DispatcherQueue.GetForCurrentThread();
 
     private bool _currentCt;            // 当前编辑阵营：false=T，true=CT
     private bool _built;
     private CsLoadoutPreset _working = new();
 
-    // 同进程拖放：DragStarting 记录，DragOver/Drop 直接用。
-    private uint _draggingDef;
-    private CsLoadoutGroup _draggingGroup;
-    private uint? _draggingFromSlot;   // 非空=从已装备格子拖出（移动/交换）；空=从可选池拖出（装备）。
+    // 页面自实现的指针拖拽（不走系统 OLE 拖放：提权进程里 WinUI3 的 CanDrag/AllowDrop 整体失效，
+    // 表现为「拖不动但左键点击有效」；指针事件不受提权影响，且对所有用户统一同一条路径）。
+    // 状态收拢为单对象，操作结束即置 null，不存在跨拖拽的陈旧字段。
+    private sealed class DragOperation
+    {
+        public UIElement Origin = null!;
+        public uint PointerId;
+        public uint Def;
+        public CsLoadoutGroup Group;
+        public uint? FromSlot;   // 非空=从已装备格子拖出（移动/交换）；空=从可选池拖出（装备）。
+        public Point PressPosition;
+        public bool Active;      // 超过拖拽阈值后才算真正开始
+        public Border? Ghost;
+        public TextBlock? GhostCaption;
+    }
+
+    private DragOperation? _drag;
+    private CellView? _dropTarget;
+    private bool _suppressNextTap;
 
     private readonly Dictionary<uint, CellView> _cells = new();
     private readonly ObservableCollection<LoadoutWeaponTile> _poolItems = new();
@@ -57,11 +74,13 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
     {
         _dispatcherQueue.TryEnqueue(() =>
         {
-            // 静态 x:Bind 文本随 Strings 重算；分组标题在代码里建，需重建；可选池武器名重新解析。
+            // 静态 x:Bind 文本随 Strings 重算；分组标题在代码里建，需重建；
+            // 池 tile 的 DisplayName 是 OneTime 绑定，清空后让差量同步整体重建以换语言。
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Strings)));
             if (_built)
             {
                 BuildCells();
+                _poolItems.Clear();
                 RefreshAll();
             }
         });
@@ -71,6 +90,7 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
     private sealed class CellView
     {
         public Border Root = null!;
+        public Border Bg = null!;
         public Image Image = null!;
         public TextBlock Empty = null!;
         public TextBlock Name = null!;
@@ -182,29 +202,30 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
         var root = new Border
         {
             Child = content,
-            Margin = new Thickness(0, 0, 0, 6),
-            AllowDrop = true,
-            CanDrag = true
+            Margin = new Thickness(0, 0, 0, 6)
         };
 
-        var cell = new CellView { Root = root, Image = image, Empty = empty, Name = name, Line = line, Slot = slot, Group = group };
+        var cell = new CellView { Root = root, Bg = bg, Image = image, Empty = empty, Name = name, Line = line, Slot = slot, Group = group };
         root.Tag = cell;
-        root.DragStarting += Cell_DragStarting;
-        root.DragOver += Cell_DragOver;
-        root.Drop += Cell_Drop;
+        root.PointerPressed += Cell_PointerPressed;
+        root.PointerMoved += DragSource_PointerMoved;
+        root.PointerReleased += DragSource_PointerReleased;
+        root.PointerCaptureLost += DragSource_PointerCaptureLost;
+        root.PointerCanceled += DragSource_PointerCanceled;
         root.Tapped += Cell_Tapped;
         return cell;
     }
 
     private void RefreshAll()
     {
+        CancelDrag();
         var slots = _working.SlotsFor(_currentCt);
         foreach (var cell in _cells.Values)
         {
             UpdateCell(cell, slots);
         }
 
-        RebuildPool(slots);
+        SyncPool(slots);
     }
 
     private static void UpdateCell(CellView cell, Dictionary<uint, uint> slots)
@@ -228,18 +249,55 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
         }
     }
 
-    private void RebuildPool(Dictionary<uint, uint> slots)
+    // 差量同步可选池：装备/卸下只增删对应 tile，避免 Clear+全量重建让滚动位置跳回顶部、图标整片重载。
+    private void SyncPool(Dictionary<uint, uint> slots)
     {
-        _poolItems.Clear();
         var equipped = slots.Values.ToHashSet();
+        var desired = new List<CsWeapon>();
         foreach (var group in CsWeaponCatalog.EditorGroups)
         {
             foreach (var weapon in CsWeaponCatalog.ForTeamGroup(_currentCt, group))
             {
                 if (!equipped.Contains(weapon.Def))
                 {
-                    _poolItems.Add(new LoadoutWeaponTile(weapon));
+                    desired.Add(weapon);
                 }
+            }
+        }
+
+        var desiredDefs = desired.Select(w => w.Def).ToHashSet();
+        for (var i = _poolItems.Count - 1; i >= 0; i--)
+        {
+            if (!desiredDefs.Contains(_poolItems[i].Weapon.Def))
+            {
+                _poolItems.RemoveAt(i);
+            }
+        }
+
+        for (var i = 0; i < desired.Count; i++)
+        {
+            if (i < _poolItems.Count && _poolItems[i].Weapon.Def == desired[i].Def)
+            {
+                continue;
+            }
+
+            var existing = -1;
+            for (var j = i + 1; j < _poolItems.Count; j++)
+            {
+                if (_poolItems[j].Weapon.Def == desired[i].Def)
+                {
+                    existing = j;
+                    break;
+                }
+            }
+
+            if (existing >= 0)
+            {
+                _poolItems.Move(existing, i);
+            }
+            else
+            {
+                _poolItems.Insert(i, new LoadoutWeaponTile(desired[i]));
             }
         }
     }
@@ -253,67 +311,246 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
         }
     }
 
-    // ---- 拖放 ----
+    // ---- 手动指针拖拽 ----
 
-    private void PoolGrid_DragItemsStarting(object sender, DragItemsStartingEventArgs e)
-    {
-        if (e.Items.Count > 0 && e.Items[0] is LoadoutWeaponTile tile)
-        {
-            _draggingDef = tile.Weapon.Def;
-            _draggingGroup = CsWeaponCatalog.GroupOf(tile.Weapon);
-            _draggingFromSlot = null;
-            e.Data.SetText(tile.Weapon.Def.ToString());
-            e.Data.RequestedOperation = DataPackageOperation.Copy;
-        }
-        else
-        {
-            e.Cancel = true;
-        }
-    }
-
-    private void Cell_DragStarting(UIElement sender, DragStartingEventArgs args)
+    private void Cell_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.Tag is not CellView cell ||
-            !_working.SlotsFor(_currentCt).TryGetValue(cell.Slot, out var def))
+            !_working.SlotsFor(_currentCt).TryGetValue(cell.Slot, out var def) ||
+            !IsPrimaryPress(e, cell.Root))
         {
-            args.Cancel = true;
             return;
         }
 
-        _draggingDef = def;
-        _draggingGroup = cell.Group;
-        _draggingFromSlot = cell.Slot;
-        args.Data.SetText(def.ToString());
-        args.Data.RequestedOperation = DataPackageOperation.Move;
+        BeginDrag(cell.Root, e, def, cell.Group, cell.Slot);
     }
 
-    private void Cell_DragOver(object sender, DragEventArgs e)
+    private void PoolItem_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.Tag is CellView cell && cell.Group == _draggingGroup)
+        if (sender is not FrameworkElement { DataContext: LoadoutWeaponTile tile } origin ||
+            !IsPrimaryPress(e, origin))
         {
-            e.AcceptedOperation = _draggingFromSlot is null ? DataPackageOperation.Copy : DataPackageOperation.Move;
-            if (e.DragUIOverride is not null)
+            return;
+        }
+
+        BeginDrag(origin, e, tile.Weapon.Def, CsWeaponCatalog.GroupOf(tile.Weapon), fromSlot: null);
+    }
+
+    private static bool IsPrimaryPress(PointerRoutedEventArgs e, UIElement origin) =>
+        e.Pointer.PointerDeviceType != Microsoft.UI.Input.PointerDeviceType.Mouse ||
+        e.GetCurrentPoint(origin).Properties.IsLeftButtonPressed;
+
+    private void BeginDrag(UIElement origin, PointerRoutedEventArgs e, uint def, CsLoadoutGroup group, uint? fromSlot)
+    {
+        CancelDrag();
+        _suppressNextTap = false;
+
+        if (!origin.CapturePointer(e.Pointer))
+        {
+            return;
+        }
+
+        _drag = new DragOperation
+        {
+            Origin = origin,
+            PointerId = e.Pointer.PointerId,
+            Def = def,
+            Group = group,
+            FromSlot = fromSlot,
+            PressPosition = e.GetCurrentPoint(DragLayer).Position
+        };
+    }
+
+    private void DragSource_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag is not { } drag ||
+            !ReferenceEquals(sender, drag.Origin) ||
+            e.Pointer.PointerId != drag.PointerId)
+        {
+            return;
+        }
+
+        // 统一用 DragLayer 坐标系：ghost 是 DragLayer(Canvas) 的子元素，命中检测也把格子换算到同一坐标系，
+        // 避免 PageRoot 的 Padding 让 ghost 偏移、或与高亮的落格错位。
+        var position = e.GetCurrentPoint(DragLayer).Position;
+        if (!drag.Active)
+        {
+            var dx = position.X - drag.PressPosition.X;
+            var dy = position.Y - drag.PressPosition.Y;
+            if (dx * dx + dy * dy < DragThresholdPixels * DragThresholdPixels)
             {
-                e.DragUIOverride.Caption = Loc.T(_draggingFromSlot is null ? "Loadout_Drag_Equip" : "Loadout_Drag_Move");
-                e.DragUIOverride.IsContentVisible = true;
+                return;
+            }
+
+            ActivateDrag(drag);
+        }
+
+        Canvas.SetLeft(drag.Ghost!, position.X + 14);
+        Canvas.SetTop(drag.Ghost!, position.Y + 10);
+        UpdateDropTarget(position, drag);
+    }
+
+    private void DragSource_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag is not { } drag ||
+            !ReferenceEquals(sender, drag.Origin) ||
+            e.Pointer.PointerId != drag.PointerId)
+        {
+            return;
+        }
+
+        var target = _dropTarget;
+        var shouldDrop = drag.Active && target is not null;
+        CancelDrag();
+
+        if (shouldDrop)
+        {
+            PerformDrop(drag, target!);
+        }
+    }
+
+    // 仅当丢失/取消的指针正是进行中拖拽的那一个时才取消，避免多指（触摸+笔）场景下抬起一个指针
+    // 误杀另一个指针正在进行的拖拽。
+    private void DragSource_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag is { } drag && e.Pointer.PointerId == drag.PointerId)
+        {
+            CancelDrag();
+        }
+    }
+
+    private void DragSource_PointerCanceled(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag is { } drag && e.Pointer.PointerId == drag.PointerId)
+        {
+            CancelDrag();
+        }
+    }
+
+    private void ActivateDrag(DragOperation drag)
+    {
+        drag.Active = true;
+        // 拖拽真正启动后，原格子随后的 Tapped 不应再触发「点击卸下」。
+        _suppressNextTap = true;
+
+        var image = new Image { Width = 56, Height = 24, Stretch = Stretch.Uniform };
+        if (CsWeaponCatalog.ByDef(drag.Def) is { } weapon)
+        {
+            image.Source = new SvgImageSource(new Uri(weapon.IconUri));
+        }
+
+        var caption = new TextBlock
+        {
+            FontSize = 11,
+            Foreground = Brush(0xFF, 0xE6, 0xEA, 0xF0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        panel.Children.Add(image);
+        panel.Children.Add(caption);
+
+        drag.GhostCaption = caption;
+        drag.Ghost = new Border
+        {
+            Background = Brush(0xE6, 0x20, 0x2B, 0x3A),
+            BorderBrush = Brush(0xFF, 0x3A, 0x46, 0x58),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(4),
+            Padding = new Thickness(8, 4, 8, 4),
+            IsHitTestVisible = false
+        };
+        drag.Ghost.Child = panel;
+        DragLayer.Children.Add(drag.Ghost);
+        UpdateGhostCaption(drag, validTarget: false);
+    }
+
+    private void UpdateDropTarget(Point position, DragOperation drag)
+    {
+        CellView? target = null;
+        foreach (var cell in _cells.Values)
+        {
+            if (cell.Group != drag.Group)
+            {
+                continue;
+            }
+
+            var topLeft = cell.Root.TransformToVisual(DragLayer).TransformPoint(new Point(0, 0));
+            if (position.X >= topLeft.X && position.X <= topLeft.X + cell.Root.ActualWidth &&
+                position.Y >= topLeft.Y && position.Y <= topLeft.Y + cell.Root.ActualHeight)
+            {
+                target = cell;
+                break;
             }
         }
-        else
+
+        SetDropTarget(target);
+        UpdateGhostCaption(drag, target is not null);
+    }
+
+    private void SetDropTarget(CellView? target)
+    {
+        if (ReferenceEquals(_dropTarget, target))
         {
-            e.AcceptedOperation = DataPackageOperation.None;
+            return;
+        }
+
+        if (_dropTarget is { } previous)
+        {
+            previous.Bg.BorderBrush = Brush(0x33, 0xFF, 0xFF, 0xFF);
+            previous.Bg.BorderThickness = new Thickness(1);
+        }
+
+        _dropTarget = target;
+        if (target is not null)
+        {
+            target.Bg.BorderBrush = Brush(0xFF, 0x4C, 0xC2, 0xFF);
+            target.Bg.BorderThickness = new Thickness(2);
         }
     }
 
-    private void Cell_Drop(object sender, DragEventArgs e)
+    private void UpdateGhostCaption(DragOperation drag, bool validTarget)
     {
-        if ((sender as FrameworkElement)?.Tag is not CellView cell || cell.Group != _draggingGroup)
+        if (drag.GhostCaption is null || drag.Ghost is null)
+        {
+            return;
+        }
+
+        var name = CsWeaponCatalog.ByDef(drag.Def)?.LocalizedName ?? drag.Def.ToString();
+        drag.GhostCaption.Text = validTarget
+            ? $"{Loc.T(drag.FromSlot is null ? "Loadout_Drag_Equip" : "Loadout_Drag_Move")} · {name}"
+            : name;
+        drag.Ghost.Opacity = validTarget ? 1.0 : 0.7;
+    }
+
+    private void CancelDrag()
+    {
+        if (_drag is { } drag)
+        {
+            if (drag.Ghost is { } ghost)
+            {
+                DragLayer.Children.Remove(ghost);
+            }
+
+            // 必须显式释放 OS 级指针捕获：若拖拽经非 PointerReleased 路径结束（切阵营触发 RefreshAll、
+            // 放置成功后 RefreshAll 等），未释放会让捕获泄漏到 origin，后续指针事件被错误路由、新拖拽无法激活。
+            drag.Origin.ReleasePointerCaptures();
+        }
+
+        SetDropTarget(null);
+        _drag = null;
+    }
+
+    private void PerformDrop(DragOperation drag, CellView cell)
+    {
+        if (cell.Group != drag.Group)
         {
             return;
         }
 
         var slots = _working.SlotsFor(_currentCt);
 
-        if (_draggingFromSlot is { } fromSlot)
+        if (drag.FromSlot is { } fromSlot)
         {
             // 已装备武器换位置：目标空则移动，目标有枪则交换。
             if (fromSlot == cell.Slot)
@@ -323,19 +560,19 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
 
             if (slots.TryGetValue(cell.Slot, out var targetDef))
             {
-                slots[cell.Slot] = _draggingDef;
+                slots[cell.Slot] = drag.Def;
                 slots[fromSlot] = targetDef;
             }
             else
             {
-                slots[cell.Slot] = _draggingDef;
+                slots[cell.Slot] = drag.Def;
                 slots.Remove(fromSlot);
             }
         }
         else
         {
             // 从可选池装备（若原本有枪则被顶替，刷新后顶替下来的枪回到可选池）。
-            slots[cell.Slot] = _draggingDef;
+            slots[cell.Slot] = drag.Def;
         }
 
         Persist();
@@ -344,6 +581,12 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
 
     private void Cell_Tapped(object sender, TappedRoutedEventArgs e)
     {
+        if (_suppressNextTap)
+        {
+            _suppressNextTap = false;
+            return;
+        }
+
         if ((sender as FrameworkElement)?.Tag is CellView cell &&
             _working.SlotsFor(_currentCt).Remove(cell.Slot))
         {

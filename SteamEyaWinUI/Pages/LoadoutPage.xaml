@@ -7,9 +7,19 @@
     NavigationCacheMode="Required">
 
     <Page.Resources>
-        <!-- 可选武器（未装备）：小条，可拖拽到上方格子。 -->
+        <!-- 可选武器（未装备）：小条，可拖拽到上方格子。
+             拖拽走页面自实现的指针拖拽（非系统 OLE），提权运行时依然可用。 -->
         <DataTemplate x:Key="PoolTileTemplate" x:DataType="models:LoadoutWeaponTile">
-            <Grid Width="150" Height="32" Margin="0,0,6,6" Background="Transparent">
+            <Grid
+                Width="150"
+                Height="32"
+                Margin="0,0,6,6"
+                Background="Transparent"
+                PointerPressed="PoolItem_PointerPressed"
+                PointerMoved="DragSource_PointerMoved"
+                PointerReleased="DragSource_PointerReleased"
+                PointerCaptureLost="DragSource_PointerCaptureLost"
+                PointerCanceled="DragSource_PointerCanceled">
                 <Border CornerRadius="4" Background="#FF202B3A" BorderThickness="1" BorderBrush="#FF3A4658" />
                 <StackPanel Orientation="Horizontal" Spacing="6" Padding="6,0" VerticalAlignment="Center">
                     <Image Width="42" Height="18" Stretch="Uniform">
@@ -23,7 +33,7 @@
         </DataTemplate>
     </Page.Resources>
 
-    <Grid Padding="32,24,32,16" RowSpacing="12">
+    <Grid x:Name="PageRoot" Padding="32,24,32,16" RowSpacing="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -77,13 +87,16 @@
                         MaxHeight="160"
                         SelectionMode="None"
                         IsItemClickEnabled="False"
-                        CanDragItems="True"
-                        CanReorderItems="False"
-                        AllowDrop="False"
-                        DragItemsStarting="PoolGrid_DragItemsStarting"
                         ItemTemplate="{StaticResource PoolTileTemplate}" />
                 </StackPanel>
             </Grid>
         </Border>
+
+        <!-- 拖拽 ghost 图层：跟随指针的武器缩略，不参与命中检测。 -->
+        <Canvas
+            x:Name="DragLayer"
+            Grid.Row="0"
+            Grid.RowSpan="3"
+            IsHitTestVisible="False" />
     </Grid>
 </Page>
