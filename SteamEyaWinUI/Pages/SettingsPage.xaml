@@ -185,12 +185,18 @@
                             VerticalAlignment="Center"
                             Text="{x:Bind Strings.Get('Settings_Cs2Sync_Source'), Mode=OneWay}"
                             Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                        <ComboBox
-                            x:Name="Cs2SyncSourceCombo"
+                        <AutoSuggestBox
+                            x:Name="Cs2SyncSourceBox"
                             Grid.Column="1"
                             HorizontalAlignment="Stretch"
-                            SelectionChanged="Cs2SyncSourceCombo_SelectionChanged"
-                            PlaceholderText="{x:Bind Strings.Get('Settings_Cs2Sync_Source_Placeholder'), Mode=OneWay}" />
+                            VerticalAlignment="Center"
+                            QueryIcon="Find"
+                            UpdateTextOnSelect="False"
+                            PlaceholderText="{x:Bind Strings.Get('Settings_Cs2Sync_Source_Placeholder'), Mode=OneWay}"
+                            TextChanged="Cs2SyncSourceBox_TextChanged"
+                            QuerySubmitted="Cs2SyncSourceBox_QuerySubmitted"
+                            GotFocus="Cs2SyncSourceBox_GotFocus"
+                            LostFocus="Cs2SyncSourceBox_LostFocus" />
                         <Button
                             x:Name="Cs2SyncRefreshButton"
                             Grid.Column="2"
