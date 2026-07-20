@@ -54,7 +54,10 @@ internal sealed class SettingsService
                         {
                             settings.FontFamily = null;
                         }
-                        settings.BackgroundOpacity = Math.Clamp(settings.BackgroundOpacity, 0, 100);
+                        settings.BackgroundOpacity = Math.Clamp(
+                            settings.BackgroundOpacity,
+                            AppSettings.MinimumBackgroundOpacity,
+                            AppSettings.MaximumBackgroundOpacity);
                         return settings;
                     }
                 }
@@ -107,6 +110,9 @@ internal sealed class SettingsService
 
 internal sealed class AppSettings
 {
+    public const int MinimumBackgroundOpacity = 60;
+    public const int MaximumBackgroundOpacity = 80;
+
     /// <summary>界面语言代码：zh-Hans / en / zh-Hant。null 表示尚未选择（首次启动按系统语言推断）。</summary>
     public string? Language { get; set; }
 
@@ -119,7 +125,7 @@ internal sealed class AppSettings
     /// <summary>是否使用 Desktop Acrylic 毛玻璃；关闭时使用普通 Mica 背景。</summary>
     public bool GlassEffectEnabled { get; set; }
 
-    /// <summary>毛玻璃模式下卡片和控件表面的不透明度百分比（0-100）。</summary>
+    /// <summary>毛玻璃模式下卡片和控件表面的不透明度百分比（60-80）。</summary>
     public int BackgroundOpacity { get; set; } = 72;
 
     /// <summary>

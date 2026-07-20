@@ -13,11 +13,13 @@
                     <SolidColorBrush x:Key="LoadoutSectionBrush" Color="#78202020" />
                     <SolidColorBrush x:Key="LoadoutStrokeBrush" Color="#42FFFFFF" />
                     <SolidColorBrush x:Key="LoadoutWeaponCardBackgroundBrush" Color="#1A000000" />
+                    <SolidColorBrush x:Key="LoadoutWeaponCardTextBrush" Color="#FFFFFFFF" />
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
                     <SolidColorBrush x:Key="LoadoutSectionBrush" Color="#8AFFFFFF" />
                     <SolidColorBrush x:Key="LoadoutStrokeBrush" Color="#36FFFFFF" />
                     <SolidColorBrush x:Key="LoadoutWeaponCardBackgroundBrush" Color="#80000000" />
+                    <SolidColorBrush x:Key="LoadoutWeaponCardTextBrush" Color="#FFFFFFFF" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
             <SolidColorBrush x:Key="LoadoutWeaponCardBorderBrush" Color="#4D000000" />
@@ -38,7 +40,7 @@
                 <Setter Property="FontWeight" Value="SemiBold" />
             </Style>
             <Style x:Key="LoadoutWeaponNameStyle" TargetType="TextBlock">
-                <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                <Setter Property="Foreground" Value="{ThemeResource LoadoutWeaponCardTextBrush}" />
                 <Setter Property="FontWeight" Value="SemiBold" />
             </Style>
 
@@ -79,7 +81,7 @@
                                 Text="{x:Bind DisplayName}"
                                 FontSize="13"
                                 FontWeight="SemiBold"
-                                Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                Foreground="{ThemeResource LoadoutWeaponCardTextBrush}"
                                 MaxLines="1"
                                 VerticalAlignment="Center"
                                 TextTrimming="CharacterEllipsis" />

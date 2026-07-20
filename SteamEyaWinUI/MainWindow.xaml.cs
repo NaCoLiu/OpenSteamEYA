@@ -20,6 +20,7 @@ public sealed partial class MainWindow : Window
 {
     private static readonly string[] FontResourceKeys =
     [
+        "XamlAutoFontFamily",
         "ContentControlThemeFontFamily",
         "TextControlThemeFontFamily"
     ];
@@ -40,6 +41,8 @@ public sealed partial class MainWindow : Window
     private const int MinWindowWidth = 1180;
     private const int MinWindowHeight = 780;
     private const uint WmGetMinMaxInfo = 0x0024;
+    private const uint DwmwaBorderColor = 34;
+    private const uint DwmwaColorNone = 0xFFFFFFFE;
     private const nuint WindowSubclassId = 1;
 
     private static nint s_hwnd;
@@ -228,7 +231,10 @@ public sealed partial class MainWindow : Window
     public void ApplyGlassAppearance(bool enabled, int backgroundOpacity)
     {
         _glassEffectEnabled = enabled;
-        _backgroundOpacity = Math.Clamp(backgroundOpacity, 0, 100);
+        _backgroundOpacity = Math.Clamp(
+            backgroundOpacity,
+            AppSettings.MinimumBackgroundOpacity,
+            AppSettings.MaximumBackgroundOpacity);
 
         if (enabled)
         {
@@ -253,7 +259,10 @@ public sealed partial class MainWindow : Window
 
     public void ApplyGlassSurfaceOpacity(int opacity)
     {
-        _backgroundOpacity = Math.Clamp(opacity, 0, 100);
+        _backgroundOpacity = Math.Clamp(
+            opacity,
+            AppSettings.MinimumBackgroundOpacity,
+            AppSettings.MaximumBackgroundOpacity);
         if (_glassEffectEnabled)
         {
             ApplyAcrylicOpacity(_backgroundOpacity);
@@ -468,6 +477,16 @@ public sealed partial class MainWindow : Window
     private unsafe void ConfigureWindowSize()
     {
         s_hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
+        {
+            var borderColor = DwmwaColorNone;
+            _ = DwmSetWindowAttribute(
+                s_hwnd,
+                DwmwaBorderColor,
+                ref borderColor,
+                (uint)sizeof(uint));
+        }
+
         var scale = GetDpiForWindow(s_hwnd) / 96.0;
 
         AppWindow.Resize(new SizeInt32(
@@ -510,6 +529,13 @@ public sealed partial class MainWindow : Window
 
     [LibraryImport("user32.dll")]
     private static partial uint GetDpiForWindow(nint hwnd);
+
+    [LibraryImport("dwmapi.dll")]
+    private static partial int DwmSetWindowAttribute(
+        nint hwnd,
+        uint attribute,
+        ref uint attributeValue,
+        uint attributeSize);
 
     [LibraryImport("comctl32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
