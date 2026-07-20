@@ -277,7 +277,8 @@ internal sealed class SteamConfigService
         }
     }
 
-    private static IEnumerable<CachedSteamLoginAccount> GetLoginUsersAccounts(
+    // internal：SteamAccountNameService 离线补全 CS2 来源账号显示名时复用同一份解析。
+    internal static IEnumerable<CachedSteamLoginAccount> GetLoginUsersAccounts(
         Dictionary<string, object> loginUsers)
     {
         if (!TryGetUsers(loginUsers, out var users))
@@ -308,13 +309,12 @@ internal sealed class SteamConfigService
         }
     }
 
-    private static IEnumerable<CachedSteamLoginAccount> GetConfigAccounts(string configPath)
+    // internal：同 GetLoginUsersAccounts，供 SteamAccountNameService 复用。
+    internal static IEnumerable<CachedSteamLoginAccount> GetConfigAccounts(string configPath)
     {
         var config = VdfDocument.LoadOrEmpty(configPath);
         var steam = GetPath(config, "InstallConfigStore", "Software", "Valve", "Steam");
-        if (steam is null ||
-            !steam.TryGetValue("Accounts", out var accountsValue) ||
-            accountsValue is not Dictionary<string, object> accounts)
+        if (steam is null || VdfDocument.GetObject(steam, "Accounts") is not { } accounts)
         {
             yield break;
         }
@@ -357,8 +357,7 @@ internal sealed class SteamConfigService
         Dictionary<string, object> loginUsers,
         out Dictionary<string, object> users)
     {
-        if (loginUsers.TryGetValue("users", out var value) &&
-            value is Dictionary<string, object> existingUsers)
+        if (VdfDocument.GetObject(loginUsers, "users") is { } existingUsers)
         {
             users = existingUsers;
             return true;
@@ -370,7 +369,7 @@ internal sealed class SteamConfigService
 
     private static string? GetString(Dictionary<string, object> values, string key)
     {
-        return values.TryGetValue(key, out var value) ? value?.ToString() : null;
+        return VdfDocument.GetValue(values, key)?.ToString();
     }
 
     private static uint? ReadActiveUserAccountId()
@@ -403,9 +402,7 @@ internal sealed class SteamConfigService
     {
         var config = VdfDocument.LoadOrEmpty(configPath);
         var steam = GetPath(config, "InstallConfigStore", "Software", "Valve", "Steam");
-        if (steam is null ||
-            !steam.TryGetValue("Accounts", out var accountsValue) ||
-            accountsValue is not Dictionary<string, object> accounts)
+        if (steam is null || VdfDocument.GetObject(steam, "Accounts") is not { } accounts)
         {
             return null;
         }
@@ -429,8 +426,7 @@ internal sealed class SteamConfigService
         var current = root;
         foreach (var key in keys)
         {
-            if (!current.TryGetValue(key, out var value) ||
-                value is not Dictionary<string, object> child)
+            if (VdfDocument.GetObject(current, key) is not { } child)
             {
                 return null;
             }
