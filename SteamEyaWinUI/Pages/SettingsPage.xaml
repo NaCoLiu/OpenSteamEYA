@@ -168,6 +168,9 @@
                             x:Name="Cs2SyncToggle"
                             Grid.Column="1"
                             VerticalAlignment="Center"
+                            MinWidth="0"
+                            OnContent="{x:Null}"
+                            OffContent="{x:Null}"
                             Toggled="Cs2SyncToggle_Toggled" />
                     </Grid>
                     <Grid ColumnSpacing="12">
