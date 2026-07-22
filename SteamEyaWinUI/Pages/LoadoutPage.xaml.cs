@@ -134,13 +134,16 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
             (Loc.T("Loadout_Group_Starter"), CsLoadoutGroup.StarterPistol, [CsWeaponCatalog.StarterPistolSlot]),
             (Loc.T("Loadout_Group_Other"), CsLoadoutGroup.OtherPistol, CsWeaponCatalog.OtherPistolSlots)
         ]);
-        BuildColumn(Col1Host, [(Loc.T("Loadout_Group_Mid"), CsLoadoutGroup.Mid, CsWeaponCatalog.MidSlots)]);
-        BuildColumn(Col2Host, [(Loc.T("Loadout_Group_Rifle"), CsLoadoutGroup.Rifle, CsWeaponCatalog.RifleSlots)]);
+        BuildColumn(Col1Host, [(Loc.T("Loadout_Group_Mid"), CsLoadoutGroup.Mid, CsWeaponCatalog.MidSlots)], stretchCells: true);
+        BuildColumn(Col2Host, [(Loc.T("Loadout_Group_Rifle"), CsLoadoutGroup.Rifle, CsWeaponCatalog.RifleSlots)], stretchCells: true);
         _built = true;
     }
 
-    // 每节：标题与格子均按内容高度排列；格子高度由 EquippedGrid 的列宽按比例计算。
-    private void BuildColumn(Grid host, (string Title, CsLoadoutGroup Group, IReadOnlyList<uint> Slots)[] sections)
+    // 第一栏按内容决定整体高度；较短栏的格子均分剩余高度，与第一栏底部对齐。
+    private void BuildColumn(
+        Grid host,
+        (string Title, CsLoadoutGroup Group, IReadOnlyList<uint> Slots)[] sections,
+        bool stretchCells = false)
     {
         host.Children.Clear();
         host.RowDefinitions.Clear();
@@ -161,7 +164,10 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
 
             foreach (var slot in slots)
             {
-                host.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                host.RowDefinitions.Add(new RowDefinition
+                {
+                    Height = stretchCells ? new GridLength(1, GridUnitType.Star) : GridLength.Auto
+                });
                 var cell = BuildCell(group, slot);
                 Grid.SetRow(cell.Root, row);
                 host.Children.Add(cell.Root);
@@ -230,7 +236,7 @@ public sealed partial class LoadoutPage : Page, INotifyPropertyChanged
         {
             Child = content,
             Margin = new Thickness(0, 0, 0, 12),
-            Height = 72
+            MinHeight = 72
         };
 
         var cell = new CellView { Root = root, Bg = bg, Image = image, Empty = empty, Name = name, Slot = slot, Group = group };
